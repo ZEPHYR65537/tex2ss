@@ -11,3 +11,5 @@
 - Add portable `pandoc_blocks` generator fragments: direct AST splice before
   HTML filters, in-process LaTeX lowering for PDF, raw-node rejection, and AST
   cache fingerprints.
+- Name non-root PDFs after the final slot segment by default and support a
+  strict bundle-level `pdf_name` basename override.

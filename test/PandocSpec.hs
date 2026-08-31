@@ -84,7 +84,7 @@ fixture root = do
           (Map.singleton "default" "default.html")
           "default"
           ["filters/test.lua"]
-      metadata = BundleMetadata 1 "Page" Nothing Nothing Nothing Published Nothing [] Map.empty
+      metadata = BundleMetadata 1 "Page" Nothing Nothing Nothing Published Nothing [] Map.empty Nothing
       bundle = Bundle (Slot []) bundleDirectory indexPath metaPath metadata
   pure (config, bundle, filterPath)
 

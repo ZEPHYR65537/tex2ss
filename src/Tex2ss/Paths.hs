@@ -2,6 +2,7 @@
 
 module Tex2ss.Paths
   ( findProjectRoot
+  , isPortableName
   , mkProjectPaths
   , resolveExistingUnder
   , validateRelativePath
@@ -80,7 +81,7 @@ validateSlot raw
   | Text.isPrefixOf "/" raw || Text.isSuffixOf "/" raw = invalid
   | otherwise =
       let segments = Text.splitOn "/" raw
-       in if all validSegment segments
+       in if all isPortableName segments
             then Right (Slot segments)
             else invalid
  where
@@ -90,12 +91,15 @@ validateSlot raw
         Error
         "slot.invalid"
         "slot segments must match [a-z0-9][a-z0-9_-]* and use '/' separators"
-  validSegment segment =
-    case Text.uncons segment of
-      Nothing -> False
-      Just (first, rest) -> validFirst first && Text.all validRest rest
-  validFirst c = isAsciiLower c || isDigit c
-  validRest c = validFirst c || c == '_' || c == '-'
+
+isPortableName :: Text -> Bool
+isPortableName value =
+  case Text.uncons value of
+    Nothing -> False
+    Just (first, rest) -> validFirst first && Text.all validRest rest
+ where
+  validFirst character = isAsciiLower character || isDigit character
+  validRest character = validFirst character || character == '_' || character == '-'
 
 validateRelativePath :: FilePath -> Either Diagnostic FilePath
 validateRelativePath path

@@ -40,6 +40,7 @@ path must exist and remain inside its owning root after canonicalization.
   "template": "default",
   "visibility": "published",
   "generator": "tree.lua",
+  "pdf_name": "post-handout",
   "filters": ["filters/local.lua"],
   "data": {
     "tags": ["haskell", "pandoc"],
@@ -53,6 +54,13 @@ path must exist and remain inside its owning root after canonicalization.
 `extension/` directory. The optional experimental `generator` is one `.lua`
 file relative to the same directory. Template fields receive custom values as
 `$data_<key>$`; arrays and objects are compact JSON.
+
+`pdf_name` is an optional PDF basename without `.pdf`. It must match
+`[a-z0-9][a-z0-9_-]*`; paths, extensions, uppercase letters, and traversal are
+rejected. Without it, a non-root bundle uses the final slot segment, while the
+root bundle uses `index`. The slot directory is never changed by this field:
+`content/guide/reference` produces `pdfs/guide/reference/reference.pdf`, or
+`pdfs/guide/reference/post-handout.pdf` with the example override.
 
 The experimental generator must define `pre_generator(context)` and return a
 strict `fragments` table. Each named block fragment currently has one of these

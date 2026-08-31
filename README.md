@@ -31,8 +31,9 @@ tex2ss serve [--host 127.0.0.1] [--port 8000] [--include-drafts]
 
 `doctor` validates the project, reports the resolved `latexmk` and `pdflatex`
 versions and paths, and compiles a minimal probe document. PDF builds publish
-slot-shaped files such as `pdfs/index.pdf` and `pdfs/guide/index.pdf` only after
-the complete candidate succeeds.
+slot-shaped, recognizable files such as `pdfs/index.pdf` and
+`pdfs/guide/guide.pdf` only after the complete candidate succeeds. A bundle can
+override its basename with the optional `meta.json` field `pdf_name`.
 
 The experimental bundle-local pre-generator receives a read-only SiteIndex and
 returns named block fragments. A fragment explicitly contains either deferred

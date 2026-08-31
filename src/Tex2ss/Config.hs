@@ -32,9 +32,10 @@ import qualified Data.Text as Text
 import Data.Time (Day, defaultTimeLocale, parseTimeM)
 import System.FilePath (takeExtension)
 import Tex2ss.Diagnostics (Diagnostic, Severity (Error), diagnosticAt)
-import Tex2ss.Paths (resolveExistingUnder)
+import Tex2ss.Paths (isPortableName, resolveExistingUnder)
 import Tex2ss.Types
   ( BundleMetadata (..)
+  , PdfName (..)
   , ProjectPaths (..)
   , SiteConfig (..)
   , SiteSettings (..)
@@ -47,6 +48,12 @@ instance FromJSON Visibility where
       "published" -> pure Published
       "draft" -> pure Draft
       _ -> fail "visibility must be 'published' or 'draft'"
+
+instance FromJSON PdfName where
+  parseJSON = withText "pdf_name" $ \value ->
+    if isPortableName value
+      then pure (PdfName value)
+      else fail "pdf_name must match [a-z0-9][a-z0-9_-]* and omit the .pdf extension"
 
 instance FromJSON SiteSettings where
   parseJSON = withObject "site" $ \object -> do
@@ -98,6 +105,7 @@ instance FromJSON BundleMetadata where
       <*> pure generator
       <*> pure filters
       <*> object .:? "data" .!= Map.empty
+      <*> object .:? "pdf_name"
    where
     parseDay :: Text -> Aeson.Parser Day
     parseDay value =
@@ -160,4 +168,4 @@ configKeys :: Set Text
 configKeys = Set.fromList ["schema_version", "site", "templates", "default_template", "filters"]
 
 metadataKeys :: Set Text
-metadataKeys = Set.fromList ["schema_version", "title", "author", "date", "template", "visibility", "generator", "filters", "data"]
+metadataKeys = Set.fromList ["schema_version", "title", "author", "date", "template", "visibility", "generator", "filters", "data", "pdf_name"]

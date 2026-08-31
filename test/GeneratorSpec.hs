@@ -102,7 +102,7 @@ bundle root slot title generator =
         case slot of
           Slot [] -> root </> "content"
           Slot segments -> foldl (</>) (root </> "content") (map Text.unpack segments)
-      metadata = BundleMetadata 1 title Nothing Nothing Nothing Published generator [] Map.empty
+      metadata = BundleMetadata 1 title Nothing Nothing Nothing Published generator [] Map.empty Nothing
    in Bundle slot directory (directory </> "index.tex") (directory </> "meta.json") metadata
 
 generatorScript :: Text.Text

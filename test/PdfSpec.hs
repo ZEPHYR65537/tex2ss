@@ -44,6 +44,23 @@ tests =
           readIORef invocations >>= (@?= 1)
           doesFileExist (root </> "pdfs" </> "index.pdf") >>= assertBool "published PDF missing"
           doesFileExist (root </> "pdfs" </> ".tex2ss-manifest.json") >>= assertBool "PDF manifest missing"
+    , testCase "replaces the old PDF name through the snapshot transaction" $
+        withSystemTempDirectory "tex2ss-pdf" $ \root -> do
+          initializeFixture root
+          let runner _ invocation = do
+                createDirectoryIfMissing True (invocationOutputDirectory invocation)
+                ByteString.writeFile (invocationExpectedPdf invocation) "%PDF-renamed"
+                pure (LatexRunResult ExitSuccess "" "")
+              oldOutput = root </> "pdfs" </> "index.pdf"
+              newOutput = root </> "pdfs" </> "site-book.pdf"
+          buildPdfWith fakeEnvironment runner root False >>= (@?= Right True)
+          doesFileExist oldOutput >>= (@?= True)
+          TextIO.writeFile
+            (root </> "content" </> "meta.json")
+            "{\"schema_version\":1,\"title\":\"PDF fixture\",\"visibility\":\"published\",\"pdf_name\":\"site-book\"}"
+          buildPdfWith fakeEnvironment runner root False >>= (@?= Right True)
+          doesFileExist newOutput >>= (@?= True)
+          doesFileExist oldOutput >>= (@?= False)
     , testCase "lowers generated Pandoc blocks through the in-process LaTeX writer" $
         withSystemTempDirectory "tex2ss-pdf" $ \root -> do
           initializeFixture root

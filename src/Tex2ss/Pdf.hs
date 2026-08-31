@@ -79,9 +79,10 @@ import Tex2ss.Pandoc
 import Tex2ss.Paths (mkProjectPaths)
 import Tex2ss.Types
   ( Bundle (..)
+  , BundleMetadata (metadataPdfName)
   , ProjectPaths (..)
   , Slot (..)
-  , slotPdfOutputPath
+  , pdfOutputPath
   )
 
 data LatexEnvironment = LatexEnvironment
@@ -214,7 +215,10 @@ compileBundle
 compileBundle _ _ _ _ result@(Left _) _ = pure result
 compileBundle environment runner plan oldState (Right entries) bundle = do
   let paths = planPaths plan
-      relativeOutput = slotPdfOutputPath (bundleSlot bundle)
+      relativeOutput =
+        pdfOutputPath
+          (bundleSlot bundle)
+          (metadataPdfName $ bundleMetadata bundle)
       publishedOutput = projectPdfs paths </> relativeOutput
       candidateOutput = pdfWorkDirectory paths </> relativeOutput
   prepared <- prepareBundleSource paths (planSiteIndex plan) bundle

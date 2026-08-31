@@ -69,9 +69,11 @@ into a persistent candidate directory; tex2ss prunes stale routes, hashes the
 candidate, and only then swaps the canonical `public/` snapshot. Compiler
 failure therefore leaves the previous successful site intact.
 
-PDF outputs mirror slot shape (`index.pdf`, `guide/index.pdf`). Direct generated
-blocks are lowered by the linked Pandoc LaTeX writer, and required Pandoc snippet
-helper macros are inserted before `\\begin{document}`. Each fingerprint contains
+PDF outputs retain the slot directory and use its final segment as the default
+basename (`index.pdf`, `guide/guide.pdf`); bundle metadata may override only the
+basename with `pdf_name`. Direct generated blocks are lowered by the linked
+Pandoc LaTeX writer, and required Pandoc snippet helper macros are inserted
+before `\\begin{document}`. Each fingerprint contains
 the lowered assembled source, canonical generated AST, TeX recipe/tool versions,
 shared `latex/`, bundle `media/`, and bundle-local `extension/latex/` manifests.
 An unchanged and unmodified published PDF is copied into a fresh candidate

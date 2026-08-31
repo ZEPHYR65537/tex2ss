@@ -6,6 +6,7 @@ module Tex2ss.Types
   , Bundle (..)
   , BundleMetadata (..)
   , PageRef (..)
+  , PdfName (..)
   , ProjectPaths (..)
   , SiteConfig (..)
   , SiteIndex (..)
@@ -13,6 +14,7 @@ module Tex2ss.Types
   , Slot (..)
   , Visibility (..)
   , isVisible
+  , pdfOutputPath
   , renderSlot
   , slotOutputPath
   , slotPdfOutputPath
@@ -34,6 +36,9 @@ data BuildTarget = Html | Pdf
 newtype Slot = Slot {slotSegments :: [Text]}
   deriving stock (Eq, Ord, Show, Generic)
 
+newtype PdfName = PdfName {unPdfName :: Text}
+  deriving stock (Eq, Ord, Show, Generic)
+
 renderSlot :: Slot -> Text
 renderSlot (Slot []) = "."
 renderSlot (Slot segments) = Text.intercalate "/" segments
@@ -48,9 +53,19 @@ slotOutputPath (Slot segments) =
   foldl (</>) "" (map Text.unpack segments) </> "index.html"
 
 slotPdfOutputPath :: Slot -> FilePath
-slotPdfOutputPath (Slot []) = "index.pdf"
-slotPdfOutputPath (Slot segments) =
-  foldl (</>) "" (map Text.unpack segments) </> "index.pdf"
+slotPdfOutputPath slot = pdfOutputPath slot Nothing
+
+pdfOutputPath :: Slot -> Maybe PdfName -> FilePath
+pdfOutputPath (Slot segments) configuredName =
+  foldl (</>) "" (map Text.unpack segments)
+    </> (Text.unpack outputName <> ".pdf")
+ where
+  outputName =
+    maybe defaultName unPdfName configuredName
+  defaultName =
+    case reverse segments of
+      name : _ -> name
+      [] -> "index"
 
 data Visibility = Published | Draft
   deriving stock (Eq, Ord, Show, Generic)
@@ -87,6 +102,7 @@ data BundleMetadata = BundleMetadata
   , metadataGenerator :: Maybe FilePath
   , metadataFilters :: [FilePath]
   , metadataData :: Map Text Value
+  , metadataPdfName :: Maybe PdfName
   }
   deriving stock (Eq, Show, Generic)
 
