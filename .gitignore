@@ -1,0 +1,12 @@
+dist-newstyle/
+.tex2ss/
+public/
+pdfs/
+*.local
+
+# Model instructions and private planning stay in the external sidecar.
+GOAL.md
+AGENTS.md
+.agents/
+.codex/
+model-context/
