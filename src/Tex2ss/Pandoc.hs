@@ -2,7 +2,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Tex2ss.Pandoc
-  ( renderBundleHtml
+  ( prepareBundleSource
+  , renderBundleHtml
   ) where
 
 import Control.Monad (foldM)
@@ -34,18 +35,24 @@ import Text.Pandoc.Options
   )
 import Text.Pandoc.Walk (query, walk)
 import Tex2ss.Diagnostics (Diagnostic, Severity (Error), diagnosticAt)
+import Tex2ss.Generator
+  ( GeneratorResult (GeneratorResult)
+  , assembleGeneratedSource
+  , runPreGenerator
+  )
 import Tex2ss.Include (ExpandedSource (expandedText), expandBundleSource)
 import Tex2ss.Paths (resolveExistingUnder)
 import Tex2ss.Types
   ( Bundle (..)
-  , BundleMetadata (metadataFilters)
+  , BundleMetadata (metadataFilters, metadataGenerator)
   , ProjectPaths (projectPandoc)
   , SiteConfig (configFilters)
+  , SiteIndex
   )
 
-renderBundleHtml :: ProjectPaths -> SiteConfig -> Bundle -> IO (Either [Diagnostic] Text)
-renderBundleHtml paths config bundle = do
-  source <- expandBundleSource (bundleDirectory bundle) (bundleIndexPath bundle)
+renderBundleHtml :: ProjectPaths -> SiteConfig -> SiteIndex -> Bundle -> IO (Either [Diagnostic] Text)
+renderBundleHtml paths config siteIndex bundle = do
+  source <- prepareBundleSource paths siteIndex bundle
   globalFilters <- resolveFilters (projectPandoc paths) (configFilters config)
   localFilters <-
     resolveFilters
@@ -55,8 +62,26 @@ renderBundleHtml paths config bundle = do
     (Left problems, _, _) -> pure (Left problems)
     (_, Left problems, _) -> pure (Left problems)
     (_, _, Left problems) -> pure (Left problems)
-    (Right expanded, Right global, Right local) ->
-      runPipeline (bundleIndexPath bundle) (global <> local) (expandedText expanded)
+    (Right assembled, Right global, Right local) ->
+      runPipeline (bundleIndexPath bundle) (global <> local) assembled
+
+prepareBundleSource :: ProjectPaths -> SiteIndex -> Bundle -> IO (Either [Diagnostic] Text)
+prepareBundleSource _ siteIndex bundle = do
+  source <- expandBundleSource (bundleDirectory bundle) (bundleIndexPath bundle)
+  generated <- resolveGenerator
+  pure $ do
+    expanded <- source
+    fragments <- generated
+    assembleGeneratedSource (bundleIndexPath bundle) fragments (expandedText expanded)
+ where
+  resolveGenerator =
+    case metadataGenerator (bundleMetadata bundle) of
+      Nothing -> pure (Right $ GeneratorResult mempty)
+      Just relative -> do
+        resolved <- resolveExistingUnder (bundleDirectory bundle </> "extension") relative
+        case resolved of
+          Left problem -> pure (Left [problem])
+          Right scriptPath -> runPreGenerator scriptPath siteIndex bundle
 
 resolveFilters :: FilePath -> [FilePath] -> IO (Either [Diagnostic] [FilePath])
 resolveFilters root filters = do

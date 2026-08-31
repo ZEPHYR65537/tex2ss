@@ -15,6 +15,7 @@ module Tex2ss.Types
   , isVisible
   , renderSlot
   , slotOutputPath
+  , slotPdfOutputPath
   , slotRoute
   ) where
 
@@ -45,6 +46,11 @@ slotOutputPath :: Slot -> FilePath
 slotOutputPath (Slot []) = "index.html"
 slotOutputPath (Slot segments) =
   foldl (</>) "" (map Text.unpack segments) </> "index.html"
+
+slotPdfOutputPath :: Slot -> FilePath
+slotPdfOutputPath (Slot []) = "index.pdf"
+slotPdfOutputPath (Slot segments) =
+  foldl (</>) "" (map Text.unpack segments) </> "index.pdf"
 
 data Visibility = Published | Draft
   deriving stock (Eq, Ord, Show, Generic)
@@ -78,6 +84,7 @@ data BundleMetadata = BundleMetadata
   , metadataDate :: Maybe Day
   , metadataTemplate :: Maybe Text
   , metadataVisibility :: Visibility
+  , metadataGenerator :: Maybe FilePath
   , metadataFilters :: [FilePath]
   , metadataData :: Map Text Value
   }

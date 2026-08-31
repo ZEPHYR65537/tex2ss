@@ -6,6 +6,7 @@ module Tex2ss.App
 
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
+import GHC.IO.Encoding (setLocaleEncoding, utf8)
 import Options.Applicative
   ( Parser
   , ParserInfo
@@ -40,11 +41,14 @@ import System.IO (stderr)
 import Tex2ss.Build (BuildPlan (..), buildHtml, prepareBuildPlan)
 import Tex2ss.Diagnostics
   ( Diagnostic
-  , Severity (Error)
-  , diagnostic
   , renderDiagnostics
   )
 import Tex2ss.Paths (findProjectRoot, mkProjectPaths, validateSlot)
+import Tex2ss.Pdf
+  ( LatexEnvironment (..)
+  , buildPdf
+  , diagnoseLatexEnvironment
+  )
 import Tex2ss.Scaffold (initializeGitRepository, initializeProject, initializeSite, initializeView)
 import Tex2ss.Serve (serveProject)
 import Tex2ss.Types (BuildTarget (..))
@@ -59,6 +63,7 @@ data Command
 
 main :: IO ()
 main = do
+  setLocaleEncoding utf8
   selected <- customExecParser (prefs mempty) parserInfo
   exitWith =<< runCommand selected
 
@@ -82,17 +87,24 @@ runCommand commandValue =
           initializeGitRepository target
             >>= reportResult (const $ putStrLn $ "initialized site: " <> target)
     Doctor requested -> withProject requested $ \root -> do
-      result <- prepareBuildPlan root True
-      case result of
-        Left problems -> reportProblems 3 problems
-        Right plan -> do
+      projectResult <- prepareBuildPlan root True
+      latexResult <- diagnoseLatexEnvironment
+      case (projectResult, latexResult) of
+        (Left projectProblems, Left latexProblems) -> reportProblems 3 (projectProblems <> latexProblems)
+        (Left problems, _) -> reportProblems 3 problems
+        (_, Left problems) -> reportProblems 3 problems
+        (Right plan, Right environment) -> do
           putStrLn $ "project is valid: " <> show (length $ planAllBundles plan) <> " physical bundle(s)"
+          putStrLn $ "latexmk: " <> Text.unpack (latexmkVersion environment) <> " (" <> latexmkExecutable environment <> ")"
+          putStrLn $ "pdflatex: " <> Text.unpack (latexEngineVersion environment) <> " (" <> latexEngineExecutable environment <> ")"
+          putStrLn "LaTeX compile probe succeeded"
           pure ExitSuccess
-    Build Pdf _ ->
-      reportProblems
-        2
-        [ diagnostic Error "build.pdf-not-in-m1" "PDF is the next M2 milestone and is not implemented by this M1 executable"
-        ]
+    Build Pdf includeDrafts -> withProject Nothing $ \root -> do
+      result <- buildPdf root includeDrafts
+      case result of
+        Left problems -> reportProblems 4 problems
+        Right True -> putStrLn "build succeeded; pdfs snapshot updated" >> pure ExitSuccess
+        Right False -> putStrLn "build succeeded; pdfs snapshot unchanged" >> pure ExitSuccess
     Build Html includeDrafts -> withProject Nothing $ \root -> do
       result <- buildHtml root includeDrafts
       case result of
@@ -129,7 +141,7 @@ parserInfo =
     (helper <*> commandParser)
     ( fullDesc
         <> header "tex2ss - a LaTeX-first static site generator"
-        <> progDesc "Build semantic HTML from physical LaTeX bundles"
+        <> progDesc "Build semantic HTML and PDF from physical LaTeX bundles"
     )
 
 commandParser :: Parser Command

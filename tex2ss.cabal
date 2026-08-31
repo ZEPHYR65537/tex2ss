@@ -3,9 +3,10 @@ name:               tex2ss
 version:            0.1.0.0
 synopsis:           A LaTeX-first static site generator based on Pandoc and Hakyll
 description:
-  tex2ss turns physical LaTeX bundles into a static HTML site. Pandoc owns the
-  document AST and conversion pipeline; Hakyll owns dependency-aware site
-  compilation, routing, and templates.
+  tex2ss turns physical LaTeX bundles into a static HTML site and transactional
+  PDF snapshots. Pandoc owns the document AST and HTML conversion pipeline;
+  Hakyll owns dependency-aware site compilation, routing, and templates; a
+  structured latexmk recipe owns PDF execution.
 license:             GPL-2.0-or-later
 license-file:        LICENSE
 author:              tex2ss contributors
@@ -38,10 +39,12 @@ library
     Tex2ss.Config
     Tex2ss.Diagnostics
     Tex2ss.Discovery
+    Tex2ss.Generator
     Tex2ss.Include
     Tex2ss.Manifest
     Tex2ss.Pandoc
     Tex2ss.Paths
+    Tex2ss.Pdf
     Tex2ss.Scaffold
     Tex2ss.Serve
     Tex2ss.SiteIndex
@@ -58,12 +61,14 @@ library
     fsnotify >=0.4 && <0.5,
     hakyll ==4.17.1.0,
     http-types >=0.12 && <0.13,
+    hslua >=2.5 && <2.6,
     mtl >=2.3 && <2.4,
     optparse-applicative >=0.18 && <0.20,
     pandoc ==3.11,
     pandoc-lua-engine ==0.5.4,
     pandoc-types >=1.23.1 && <1.24,
     process >=1.6 && <1.7,
+    temporary >=1.3 && <1.4,
     text >=2.1 && <2.2,
     time >=1.12 && <1.15,
     transformers >=0.6 && <0.7,
@@ -89,9 +94,11 @@ test-suite tex2ss-test
     BuildSpec
     ConfigSpec
     DiscoverySpec
+    GeneratorSpec
     IncludeSpec
     PandocSpec
     PathsSpec
+    PdfSpec
   build-depends:
     aeson,
     base,

@@ -1,4 +1,4 @@
-# M1 architecture
+# M1/M2 architecture
 
 The build is deliberately split into a pure preflight model and an effectful
 compiler model.
@@ -21,6 +21,20 @@ controlled include expansion -> Pandoc readLaTeX (once per rebuilt bundle)
                   |
                   v
    SHA-256 manifest + snapshot commit -> public/
+
+assembled LaTeX + declared resource manifests
+                  |
+                  v
+       input fingerprint + PDF cache
+                  |
+                  v
+structured latexmk -pdf invocation per changed bundle
+                  |
+                  v
+        .tex2ss/work/pdfs candidate
+                  |
+                  v
+   SHA-256 manifest + snapshot commit -> pdfs/
 ```
 
 ## Ownership boundaries
@@ -29,8 +43,9 @@ controlled include expansion -> Pandoc readLaTeX (once per rebuilt bundle)
 - `index.tex` and `sources/*.tex` own document content and LaTeX semantics.
 - Pandoc owns the document AST, Lua filter model, and HTML conversion.
 - Hakyll owns tracked inputs, incremental compilation, templates, and routes.
-- tex2ss owns validation, paths, build planning, media routing, and the final
-  snapshot transaction.
+- `latexmk`/`pdflatex` own TeX execution for the single M2 PDF recipe.
+- tex2ss owns validation, paths, build planning, media routing, structured
+  process arguments, PDF fingerprints, and both final snapshot transactions.
 
 The Hakyll dependency is compiled with `-usePandoc`. tex2ss links Pandoc 3.11
 and `pandoc-lua-engine` directly, so there is one documented Pandoc adapter and
@@ -48,6 +63,17 @@ Includes and filters are explicit Hakyll content dependencies. Hakyll builds
 into a persistent candidate directory; tex2ss prunes stale routes, hashes the
 candidate, and only then swaps the canonical `public/` snapshot. Compiler
 failure therefore leaves the previous successful site intact.
+
+PDF outputs mirror slot shape (`index.pdf`, `guide/index.pdf`). Each fingerprint
+contains the assembled source, TeX recipe/tool versions, shared `latex/`, bundle
+`media/`, and bundle-local `extension/latex/` manifests. An unchanged and
+unmodified published PDF is copied into a fresh candidate without invoking TeX.
+Every changed bundle compiles in `.tex2ss/tmp/pdf/`; only a complete candidate
+can atomically replace `pdfs/`.
+
+`doctor` resolves `latexmk` and `pdflatex`, reports their paths and versions,
+and runs the same recipe on a minimal document. Finding commands on `PATH` alone
+is therefore not considered a healthy LaTeX environment.
 
 ## Trusted Lua
 

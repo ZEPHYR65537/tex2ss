@@ -157,6 +157,7 @@ validateBundle config bundle = do
       localFilterRoot = bundleDirectory bundle </> "extension"
   includeResult <- expandBundleSource (bundleDirectory bundle) (bundleIndexPath bundle)
   localFilters <- traverse (resolveExistingUnder localFilterRoot) (metadataFilters metadata)
+  generator <- traverse (resolveExistingUnder localFilterRoot) (metadataGenerator metadata)
   let templateProblems =
         [ diagnosticAt
             Error
@@ -166,13 +167,15 @@ validateBundle config bundle = do
         | not (Map.member templateAlias $ configTemplates config)
         ]
       filterProblems = [problem | Left problem <- localFilters]
+      generatorProblems = maybe [] (either (: []) (const [])) generator
       includeProblems = either id (const []) includeResult
-      problems = templateProblems <> filterProblems <> includeProblems
+      problems = templateProblems <> filterProblems <> generatorProblems <> includeProblems
       includes = filter (/= bundleIndexPath bundle) $ either (const []) expandedDependencies includeResult
       resolvedLocalFilters = [path | Right path <- localFilters]
+      resolvedGenerator = maybe [] (either (const []) (: [])) generator
   pure $
     if null problems
-      then Right (bundle, includes <> resolvedLocalFilters)
+      then Right (bundle, includes <> resolvedLocalFilters <> resolvedGenerator)
       else Left problems
 
 buildHtml :: FilePath -> Bool -> IO (Either [Diagnostic] Bool)
@@ -294,7 +297,7 @@ pageCompiler plan bundle = do
   void getResourceBody
   forM_ (nub directDependencies) $ \path ->
     void (loadBody $ projectIdentifier paths path :: Compiler String)
-  rendered <- unsafeCompiler $ renderBundleHtml paths config bundle
+  rendered <- unsafeCompiler $ renderBundleHtml paths config (planSiteIndex plan) bundle
   html <-
     case rendered of
       Left problems -> fail (Text.unpack $ renderDiagnostics problems)

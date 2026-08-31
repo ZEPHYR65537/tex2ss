@@ -5,13 +5,15 @@ module Tex2ss.Manifest
   ( Manifest (..)
   , ManifestEntry (..)
   , commitHtmlSnapshot
+  , commitPdfSnapshot
   , createManifest
   , htmlWorkDirectory
+  , pdfWorkDirectory
   ) where
 
 import Control.Exception (IOException, try)
 import Control.Monad (forM, when)
-import Crypto.Hash (Digest, SHA256, hashlazy)
+import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson
   ( FromJSON (parseJSON)
   , ToJSON (toJSON)
@@ -23,6 +25,7 @@ import Data.Aeson
   , (.=)
   )
 import qualified Data.ByteString.Lazy as LazyByteString
+import qualified Data.ByteString as ByteString
 import Data.List (sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -79,31 +82,46 @@ instance FromJSON Manifest where
 htmlWorkDirectory :: ProjectPaths -> FilePath
 htmlWorkDirectory paths = projectState paths </> "work" </> "public"
 
+pdfWorkDirectory :: ProjectPaths -> FilePath
+pdfWorkDirectory paths = projectState paths </> "work" </> "pdfs"
+
 createManifest :: FilePath -> IO Manifest
 createManifest root = do
   files <- listFilesRecursively root
   entries <- forM (sort files) $ \path -> do
-    bytes <- LazyByteString.readFile path
-    let digest = hashlazy bytes :: Digest SHA256
+    bytes <- ByteString.readFile path
+    let digest = hash bytes :: Digest SHA256
     pure
       ManifestEntry
         { manifestPath = slashPath $ makeRelative root path
         , manifestSha256 = Text.pack (show digest)
-        , manifestBytes = fromIntegral (LazyByteString.length bytes)
+        , manifestBytes = fromIntegral (ByteString.length bytes)
         }
   pure $ Manifest 1 entries
 
 commitHtmlSnapshot :: ProjectPaths -> IO (Either [Diagnostic] Bool)
-commitHtmlSnapshot paths = do
-  let candidate = htmlWorkDirectory paths
-      staging = projectState paths </> "commit-public"
-      backup = projectState paths </> "previous-public"
-      destination = projectPublic paths
-      manifestName = ".tex2ss-manifest.json"
+commitHtmlSnapshot paths =
+  commitSnapshot
+    (htmlWorkDirectory paths)
+    (projectState paths </> "commit-public")
+    (projectState paths </> "previous-public")
+    (projectPublic paths)
+
+commitPdfSnapshot :: ProjectPaths -> IO (Either [Diagnostic] Bool)
+commitPdfSnapshot paths =
+  commitSnapshot
+    (pdfWorkDirectory paths)
+    (projectState paths </> "commit-pdfs")
+    (projectState paths </> "previous-pdfs")
+    (projectPdfs paths)
+
+commitSnapshot :: FilePath -> FilePath -> FilePath -> FilePath -> IO (Either [Diagnostic] Bool)
+commitSnapshot candidate staging backup destination = do
+  let manifestName = ".tex2ss-manifest.json"
       destinationManifest = destination </> manifestName
   candidateExists <- doesDirectoryExist candidate
   if not candidateExists
-    then pure $ Left [diagnosticAt Error "build.candidate-missing" candidate "Hakyll produced no candidate directory"]
+    then pure $ Left [diagnosticAt Error "build.candidate-missing" candidate "build produced no candidate directory"]
     else do
       operation <- try @IOException $ do
         removeIfExists staging
@@ -119,7 +137,9 @@ commitHtmlSnapshot paths = do
             when destinationExists $ renameDirectory destination backup
             committed <- try @IOException (renameDirectory staging destination)
             case committed of
-              Right () -> removeIfExists backup >> pure True
+              Right () -> do
+                _ <- try @IOException (removeIfExists backup)
+                pure True
               Left exception -> do
                 currentExists <- doesDirectoryExist destination
                 when currentExists $ removePathForcibly destination

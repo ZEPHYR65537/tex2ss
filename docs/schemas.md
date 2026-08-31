@@ -39,6 +39,7 @@ path must exist and remain inside its owning root after canonicalization.
   "date": "2026-08-31",
   "template": "default",
   "visibility": "published",
+  "generator": "tree.lua",
   "filters": ["filters/local.lua"],
   "data": {
     "tags": ["haskell", "pandoc"],
@@ -49,8 +50,13 @@ path must exist and remain inside its owning root after canonicalization.
 
 `title` is required. `date`, when present, is `YYYY-MM-DD`; visibility is
 `published` or `draft`. Local filter paths are relative to the bundle's
-`extension/` directory. Template fields receive custom values as
+`extension/` directory. The optional experimental `generator` is one `.lua`
+file relative to the same directory. Template fields receive custom values as
 `$data_<key>$`; arrays and objects are compact JSON.
+
+M2 intentionally adds no PDF recipe field to schema v1. The first slice has one
+fixed, structured `latexmk -pdf` recipe; configurable recipe schemas will be
+introduced only after this execution and transaction model is stable.
 
 ## Physical bundles and routes
 

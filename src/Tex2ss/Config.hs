@@ -87,12 +87,15 @@ instance FromJSON BundleMetadata where
     rawDate <- object .:? "date"
     parsedDate <- traverse parseDay rawDate
     filters <- object .:? "filters" .!= []
+    generator <- object .:? "generator"
     traverse_ (validateExtension ".lua" "filter") filters
+    traverse_ (validateExtension ".lua" "generator") generator
     BundleMetadata version title
       <$> object .:? "author"
       <*> pure parsedDate
       <*> object .:? "template"
       <*> object .:? "visibility" .!= Published
+      <*> pure generator
       <*> pure filters
       <*> object .:? "data" .!= Map.empty
    where
@@ -157,4 +160,4 @@ configKeys :: Set Text
 configKeys = Set.fromList ["schema_version", "site", "templates", "default_template", "filters"]
 
 metadataKeys :: Set Text
-metadataKeys = Set.fromList ["schema_version", "title", "author", "date", "template", "visibility", "filters", "data"]
+metadataKeys = Set.fromList ["schema_version", "title", "author", "date", "template", "visibility", "generator", "filters", "data"]

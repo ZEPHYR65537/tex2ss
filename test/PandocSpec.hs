@@ -13,6 +13,7 @@ import Test.Tasty.HUnit (assertBool, testCase)
 import Tex2ss.Diagnostics (Diagnostic (..))
 import Tex2ss.Pandoc (renderBundleHtml)
 import Tex2ss.Paths (mkProjectPaths)
+import Tex2ss.SiteIndex (buildSiteIndex)
 import Tex2ss.Types
   ( Bundle (..)
   , BundleMetadata (..)
@@ -30,7 +31,7 @@ tests =
         withSystemTempDirectory "tex2ss-pandoc" $ \root -> do
           (config, bundle, filterPath) <- fixture root
           TextIO.writeFile filterPath validFilter
-          result <- renderBundleHtml (mkProjectPaths root) config bundle
+          result <- renderBundleHtml (mkProjectPaths root) config (buildSiteIndex [bundle]) bundle
           case result of
             Left _ -> assertBool "expected Pandoc success" False
             Right html -> assertBool "Lua filter result missing" ("Filtered by Lua" `Text.isInfixOf` html)
@@ -38,7 +39,7 @@ tests =
         withSystemTempDirectory "tex2ss-pandoc" $ \root -> do
           (config, bundle, filterPath) <- fixture root
           TextIO.writeFile filterPath "function Para(element) this is invalid end"
-          result <- renderBundleHtml (mkProjectPaths root) config bundle
+          result <- renderBundleHtml (mkProjectPaths root) config (buildSiteIndex [bundle]) bundle
           case result of
             Left problems -> do
               assertBool "expected pandoc.failed" ("pandoc.failed" `elem` map diagnosticCode problems)
@@ -64,7 +65,7 @@ fixture root = do
           (Map.singleton "default" "default.html")
           "default"
           ["filters/test.lua"]
-      metadata = BundleMetadata 1 "Page" Nothing Nothing Nothing Published [] Map.empty
+      metadata = BundleMetadata 1 "Page" Nothing Nothing Nothing Published Nothing [] Map.empty
       bundle = Bundle (Slot []) bundleDirectory indexPath metaPath metadata
   pure (config, bundle, filterPath)
 

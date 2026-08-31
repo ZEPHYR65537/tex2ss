@@ -6,8 +6,9 @@ import qualified Data.ByteString.Char8 as ByteString
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, testCase)
+import Test.Tasty.HUnit ((@?=), assertBool, testCase)
 import Tex2ss.Config (loadBundleMetadata, loadSiteConfig)
+import Tex2ss.Types (BundleMetadata (metadataGenerator))
 
 tests :: TestTree
 tests =
@@ -31,6 +32,12 @@ tests =
           ByteString.writeFile path "{\"schema_version\":1,\"title\":\"x\",\"date\":\"31/08/2026\"}"
           result <- loadBundleMetadata path
           assertBool "expected invalid date" (either (const True) (const False) result)
+    , testCase "accepts a bundle-local Lua generator" $
+        withSystemTempDirectory "tex2ss-meta" $ \root -> do
+          let path = root </> "meta.json"
+          ByteString.writeFile path "{\"schema_version\":1,\"title\":\"x\",\"generator\":\"tree.lua\"}"
+          result <- loadBundleMetadata path
+          fmap metadataGenerator result @?= Right (Just "tree.lua")
     ]
 
 validConfig :: ByteString.ByteString
