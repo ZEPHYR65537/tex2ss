@@ -45,6 +45,25 @@ tests =
               assertBool "expected pandoc.failed" ("pandoc.failed" `elem` map diagnosticCode problems)
               assertBool "expected Lua detail" (any (Text.isInfixOf "syntax" . diagnosticMessage) problems)
             Right _ -> assertBool "expected Lua filter failure" False
+    , testCase "splices generated Pandoc blocks before filters run" $
+        withSystemTempDirectory "tex2ss-pandoc" $ \root -> do
+          (config, originalBundle, filterPath) <- fixture root
+          let extensionDirectory = bundleDirectory originalBundle </> "extension"
+              generatorPath = extensionDirectory </> "semantic.lua"
+              metadata = (bundleMetadata originalBundle) {metadataGenerator = Just "semantic.lua"}
+              bundle = originalBundle {bundleMetadata = metadata}
+          createDirectoryIfMissing True extensionDirectory
+          TextIO.writeFile (bundleIndexPath bundle) generatedSourceDocument
+          TextIO.writeFile generatorPath semanticGenerator
+          TextIO.writeFile filterPath generatedBlockFilter
+          result <- renderBundleHtml (mkProjectPaths root) config (buildSiteIndex [bundle]) bundle
+          case result of
+            Left _ -> assertBool "expected generated Pandoc block success" False
+            Right html -> do
+              assertBool "filter did not see generated AST" ("Filtered semantic block" `Text.isInfixOf` html)
+              assertBool "first deferred fragment is missing" ("First deferred paragraph" `Text.isInfixOf` html)
+              assertBool "second deferred fragment is missing" ("Second deferred paragraph" `Text.isInfixOf` html)
+              assertBool "internal marker leaked" (not $ "texssgeneratedpandocblocks" `Text.isInfixOf` html)
     ]
 
 fixture :: FilePath -> IO (SiteConfig, Bundle, FilePath)
@@ -83,5 +102,41 @@ validFilter =
   Text.unlines
     [ "function Para(element)"
     , "  return pandoc.Para({ pandoc.Str('Filtered by Lua') })"
+    , "end"
+    ]
+
+generatedSourceDocument :: Text.Text
+generatedSourceDocument =
+  Text.unlines
+    [ "\\documentclass{article}"
+    , "\\begin{document}"
+    , "\\tex2ssgenerated{first}"
+    , "\\tex2ssgenerated{semantic}"
+    , "\\tex2ssgenerated{second}"
+    , "\\end{document}"
+    ]
+
+semanticGenerator :: Text.Text
+semanticGenerator =
+  Text.unlines
+    [ "function pre_generator(context)"
+    , "  return { fragments = {"
+    , "    first = { type = 'deferred_latex', value = 'First deferred paragraph.' },"
+    , "    semantic = {"
+    , "      type = 'pandoc_blocks',"
+    , "      blocks = pandoc.Blocks({ pandoc.Para({ pandoc.Str('Generated semantic block') }) })"
+    , "    },"
+    , "    second = { type = 'deferred_latex', value = 'Second deferred paragraph.' }"
+    , "  } }"
+    , "end"
+    ]
+
+generatedBlockFilter :: Text.Text
+generatedBlockFilter =
+  Text.unlines
+    [ "function Para(element)"
+    , "  if pandoc.utils.stringify(element) == 'Generated semantic block' then"
+    , "    return pandoc.Para({ pandoc.Str('Filtered semantic block') })"
+    , "  end"
     , "end"
     ]

@@ -10,7 +10,9 @@ strict config + physical bundle discovery
        immutable global SiteIndex
                   |
                   v
-controlled include expansion -> Pandoc readLaTeX (once per rebuilt bundle)
+controlled include expansion + deferred LaTeX generator fragments
+                  -> Pandoc readLaTeX (once per rebuilt bundle)
+                  -> direct Pandoc block splice
                   -> ordered in-process Lua filters
                   -> residual RawTeX validation
                   -> Pandoc HTML5 writer
@@ -22,7 +24,8 @@ controlled include expansion -> Pandoc readLaTeX (once per rebuilt bundle)
                   v
    SHA-256 manifest + snapshot commit -> public/
 
-assembled LaTeX + declared resource manifests
+assembled LaTeX + in-process lowering of direct Pandoc blocks
+                  + declared resource manifests
                   |
                   v
        input fingerprint + PDF cache
@@ -42,6 +45,8 @@ structured latexmk -pdf invocation per changed bundle
 - `meta.json` owns static page facts used by discovery and SiteIndex.
 - `index.tex` and `sources/*.tex` own document content and LaTeX semantics.
 - Pandoc owns the document AST, Lua filter model, and HTML conversion.
+- Generator output is explicit block-level `deferred_latex` or
+  `pandoc_blocks`; ordinary strings have no implicit reader or target format.
 - Hakyll owns tracked inputs, incremental compilation, templates, and routes.
 - `latexmk`/`pdflatex` own TeX execution for the single M2 PDF recipe.
 - tex2ss owns validation, paths, build planning, media routing, structured
@@ -64,10 +69,13 @@ into a persistent candidate directory; tex2ss prunes stale routes, hashes the
 candidate, and only then swaps the canonical `public/` snapshot. Compiler
 failure therefore leaves the previous successful site intact.
 
-PDF outputs mirror slot shape (`index.pdf`, `guide/index.pdf`). Each fingerprint
-contains the assembled source, TeX recipe/tool versions, shared `latex/`, bundle
-`media/`, and bundle-local `extension/latex/` manifests. An unchanged and
-unmodified published PDF is copied into a fresh candidate without invoking TeX.
+PDF outputs mirror slot shape (`index.pdf`, `guide/index.pdf`). Direct generated
+blocks are lowered by the linked Pandoc LaTeX writer, and required Pandoc snippet
+helper macros are inserted before `\\begin{document}`. Each fingerprint contains
+the lowered assembled source, canonical generated AST, TeX recipe/tool versions,
+shared `latex/`, bundle `media/`, and bundle-local `extension/latex/` manifests.
+An unchanged and unmodified published PDF is copied into a fresh candidate
+without invoking TeX.
 Every changed bundle compiles in `.tex2ss/tmp/pdf/`; only a complete candidate
 can atomically replace `pdfs/`.
 
@@ -82,3 +90,9 @@ in-process Lua engine. M1 does not add a malicious-code sandbox. The lifecycle,
 ordered filter list, declared file dependencies, and typed outputs remain build
 contracts; undeclared filesystem, network, or process side effects are outside
 the reproducibility and cache guarantees.
+
+Generated `pandoc_blocks` are decoded through Pandoc's Lua marshal instances,
+not JSON or generated markup. Raw blocks and raw inlines are rejected at this
+boundary so the same semantic AST remains portable to HTML and PDF. Internal
+source markers only bridge the single document reader call; they are removed
+before filters and never reach either writer.

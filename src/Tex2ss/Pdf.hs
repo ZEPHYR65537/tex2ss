@@ -71,7 +71,11 @@ import Tex2ss.Manifest
   , createManifest
   , pdfWorkDirectory
   )
-import Tex2ss.Pandoc (prepareBundleSource)
+import Tex2ss.Pandoc
+  ( PreparedBundle (preparedPandocFragments)
+  , prepareBundleSource
+  , renderBundleLaTeX
+  )
 import Tex2ss.Paths (mkProjectPaths)
 import Tex2ss.Types
   ( Bundle (..)
@@ -216,22 +220,32 @@ compileBundle environment runner plan oldState (Right entries) bundle = do
   prepared <- prepareBundleSource paths (planSiteIndex plan) bundle
   case prepared of
     Left problems -> pure (Left problems)
-    Right source -> do
-      fingerprint <- pdfInputFingerprint environment paths bundle source
-      reusable <- cachedOutputIsReusable oldState relativeOutput fingerprint publishedOutput
-      if reusable
-        then do
-          createDirectoryIfMissing True (takeDirectory candidateOutput)
-          copyFile publishedOutput candidateOutput
-          outputDigest <- fileSha256 candidateOutput
-          pure . Right $ Map.insert relativeOutput (PdfCacheEntry fingerprint outputDigest) entries
-        else do
-          rendered <- compilePdfBundle environment runner paths bundle source candidateOutput
-          case rendered of
-            Left problems -> pure (Left problems)
-            Right () -> do
+    Right preparedBundle -> do
+      lowered <- renderBundleLaTeX (bundleIndexPath bundle) preparedBundle
+      case lowered of
+        Left problems -> pure (Left problems)
+        Right source -> do
+          fingerprint <-
+            pdfInputFingerprint
+              environment
+              paths
+              bundle
+              source
+              (preparedPandocFragments preparedBundle)
+          reusable <- cachedOutputIsReusable oldState relativeOutput fingerprint publishedOutput
+          if reusable
+            then do
+              createDirectoryIfMissing True (takeDirectory candidateOutput)
+              copyFile publishedOutput candidateOutput
               outputDigest <- fileSha256 candidateOutput
               pure . Right $ Map.insert relativeOutput (PdfCacheEntry fingerprint outputDigest) entries
+            else do
+              rendered <- compilePdfBundle environment runner paths bundle source candidateOutput
+              case rendered of
+                Left problems -> pure (Left problems)
+                Right () -> do
+                  outputDigest <- fileSha256 candidateOutput
+                  pure . Right $ Map.insert relativeOutput (PdfCacheEntry fingerprint outputDigest) entries
 
 compilePdfBundle
   :: LatexEnvironment
@@ -468,18 +482,19 @@ withTexInputs directories inherited =
   pieces = directories <> maybe [] (: []) previous <> [""]
   joined = Text.unpack $ Text.intercalate (Text.singleton searchPathSeparator) (map Text.pack pieces)
 
-pdfInputFingerprint :: LatexEnvironment -> ProjectPaths -> Bundle -> Text -> IO Text
-pdfInputFingerprint environment paths bundle source = do
+pdfInputFingerprint :: ToJSON generated => LatexEnvironment -> ProjectPaths -> Bundle -> Text -> generated -> IO Text
+pdfInputFingerprint environment paths bundle source generatedAst = do
   sharedLatex <- manifestIfPresent (projectRoot paths </> "latex")
   bundleMedia <- manifestIfPresent (bundleDirectory bundle </> "media")
   bundleLatex <- manifestIfPresent (bundleDirectory bundle </> "extension" </> "latex")
   let payload =
         encode $
           object
-            [ "recipe" .= ("latexmk-pdf-v1" :: Text)
+            [ "recipe" .= ("latexmk-pdf-v2-pandoc-blocks" :: Text)
             , "latexmk" .= latexmkVersion environment
             , "engine" .= latexEngineVersion environment
             , "source" .= source
+            , "generated_ast" .= generatedAst
             , "shared_latex" .= sharedLatex
             , "bundle_media" .= bundleMedia
             , "bundle_latex" .= bundleLatex

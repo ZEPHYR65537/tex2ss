@@ -44,6 +44,24 @@ tests =
           readIORef invocations >>= (@?= 1)
           doesFileExist (root </> "pdfs" </> "index.pdf") >>= assertBool "published PDF missing"
           doesFileExist (root </> "pdfs" </> ".tex2ss-manifest.json") >>= assertBool "PDF manifest missing"
+    , testCase "lowers generated Pandoc blocks through the in-process LaTeX writer" $
+        withSystemTempDirectory "tex2ss-pdf" $ \root -> do
+          initializeFixture root
+          enableSemanticGenerator root
+          stagedSource <- newIORef ""
+          let runner _ invocation = do
+                source <- TextIO.readFile (invocationSourcePath invocation)
+                modifyIORef' stagedSource (const source)
+                createDirectoryIfMissing True (invocationOutputDirectory invocation)
+                ByteString.writeFile (invocationExpectedPdf invocation) "%PDF-generated"
+                pure (LatexRunResult ExitSuccess "" "")
+          buildPdfWith fakeEnvironment runner root False >>= (@?= Right True)
+          source <- readIORef stagedSource
+          assertBool "Pandoc AST was not lowered to LaTeX" ("\\emph{semantic}" `Text.isInfixOf` source)
+          assertBool "Pandoc list helper prelude is missing" ("\\providecommand{\\tightlist}" `Text.isInfixOf` source)
+          assertBool
+            "internal generated-fragment marker leaked to latexmk"
+            (not $ "texssgeneratedpandocblocks" `Text.isInfixOf` source)
     , testCase "preserves the last PDF snapshot when latexmk fails" $
         withSystemTempDirectory "tex2ss-pdf" $ \root -> do
           initializeFixture root
@@ -89,6 +107,37 @@ initializeFixture :: FilePath -> IO ()
 initializeFixture root = do
   initialized <- initializeProject root "PDF fixture"
   assertBool "scaffold failed" (either (const False) (const True) initialized)
+
+enableSemanticGenerator :: FilePath -> IO ()
+enableSemanticGenerator root = do
+  let content = root </> "content"
+      extension = content </> "extension"
+  createDirectoryIfMissing True extension
+  TextIO.writeFile
+    (content </> "meta.json")
+    "{\"schema_version\":1,\"title\":\"Home\",\"visibility\":\"published\",\"generator\":\"semantic.lua\"}"
+  TextIO.writeFile
+    (content </> "index.tex")
+    ( Text.unlines
+        [ "\\documentclass{article}"
+        , "\\begin{document}"
+        , "\\tex2ssgenerated{semantic}"
+        , "\\end{document}"
+        ]
+    )
+  TextIO.writeFile
+    (extension </> "semantic.lua")
+    ( Text.unlines
+        [ "function pre_generator(context)"
+        , "  return { fragments = { semantic = {"
+        , "    type = 'pandoc_blocks',"
+        , "    blocks = pandoc.Blocks({ pandoc.BulletList({ { pandoc.Plain({"
+        , "      pandoc.Str('Generated'), pandoc.Space(), pandoc.Emph({ pandoc.Str('semantic') })"
+        , "    }) } }) })"
+        , "  } } }"
+        , "end"
+        ]
+    )
 
 fakeEnvironment :: LatexEnvironment
 fakeEnvironment =

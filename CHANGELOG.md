@@ -8,3 +8,6 @@
   fingerprints, transactional `pdfs/` manifests, and a real LaTeX doctor probe.
 - Add the SiteIndex/deferred-LaTeX pre-generator experiment shared by HTML and
   PDF source assembly.
+- Add portable `pandoc_blocks` generator fragments: direct AST splice before
+  HTML filters, in-process LaTeX lowering for PDF, raw-node rejection, and AST
+  cache fingerprints.

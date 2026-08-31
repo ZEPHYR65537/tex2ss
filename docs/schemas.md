@@ -54,6 +54,26 @@ path must exist and remain inside its owning root after canonicalization.
 file relative to the same directory. Template fields receive custom values as
 `$data_<key>$`; arrays and objects are compact JSON.
 
+The experimental generator must define `pre_generator(context)` and return a
+strict `fragments` table. Each named block fragment currently has one of these
+explicit shapes:
+
+```lua
+return {
+  fragments = {
+    legacy = { type = "deferred_latex", value = "\\begin{quote}...\\end{quote}" },
+    semantic = {
+      type = "pandoc_blocks",
+      blocks = pandoc.Blocks({ pandoc.Para({ pandoc.Str("Hello") }) })
+    }
+  }
+}
+```
+
+Placeholders use a standalone `\\tex2ssgenerated{name}` line. Direct Pandoc
+blocks may not contain raw target nodes. These Lua field names remain an
+experimental protocol rather than a stable schema-v1 compatibility promise.
+
 M2 intentionally adds no PDF recipe field to schema v1. The first slice has one
 fixed, structured `latexmk -pdf` recipe; configurable recipe schemas will be
 introduced only after this execution and transaction model is stable.
