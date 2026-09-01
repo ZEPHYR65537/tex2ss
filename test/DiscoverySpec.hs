@@ -2,9 +2,10 @@
 
 module DiscoverySpec (tests) where
 
+import Control.Exception (IOException, try)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.Text.IO as TextIO
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, createDirectoryLink)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty (TestTree, testGroup)
@@ -39,6 +40,22 @@ tests =
           case result of
             Left _ -> assertBool "expected discovery success" False
             Right bundles -> map bundleSlot bundles @?= [Slot ["posts", "one"]]
+    , testCase "reports a directory link that cycles back into an ancestor" $
+        withSystemTempDirectory "tex2ss-discovery" $ \root -> do
+          let content = root </> "content"
+              loop = content </> "loop"
+          createDirectoryIfMissing True content
+          linked <- try (createDirectoryLink content loop) :: IO (Either IOException ())
+          case linked of
+            Left _ -> pure ()
+            Right () -> do
+              result <- discoverBundles (mkProjectPaths root)
+              case result of
+                Left problems ->
+                  assertBool
+                    "expected the directory-cycle diagnostic"
+                    ("bundle.directory-cycle" `elem` map diagnosticCode problems)
+                Right _ -> assertBool "expected discovery to reject the cycle" False
     ]
 
 validMeta :: ByteString.ByteString

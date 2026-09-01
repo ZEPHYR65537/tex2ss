@@ -69,6 +69,13 @@ and project `.latexmkrc` files cannot silently change the fixed command model.
 file relative to the same directory. Template fields receive custom values as
 `$data_<key>$`; arrays and objects are compact JSON.
 
+HTML templates receive `$body$`, `$title$`, `$author$`, `$date$`,
+`$visibility$`, `$slot$`, `$route$`, `$site_title$`, `$site_description$`,
+`$base_url$`, `$lang$`, and `$toc$`. `$toc$` is an HTML list fragment derived
+from the final filtered Pandoc AST and is empty when the document has no
+headings. It is template presentation data, not a `meta.json` field and not a
+second document parse.
+
 `post_analyzer` is an optional experimental contract. Its `.lua` script is
 relative to the same `extension/` directory. `namespace` must contain at least
 two portable dotted segments, and `schema_version` must be positive. The script
@@ -128,7 +135,9 @@ Having only one marker is an error. Once a bundle is found, its `sources/`,
 Slot segments match `[a-z0-9][a-z0-9_-]*`. The root bundle routes to `/`; a
 bundle at `content/posts/hello/` routes to `/posts/hello/`. Bundle media is
 copied to the route-relative `media/` subtree, while site assets are copied to
-`/assets/`.
+`/assets/`. Consequently `\includegraphics{media/img/figure.png}` uses the same
+bundle-relative source convention for HTML and PDF; filters remain responsible
+for any nonstandard media macro semantics.
 
 Literal `\input{...}` and `\include{...}` commands are expanded only when the
 resolved file remains under the current bundle's `sources/` directory.

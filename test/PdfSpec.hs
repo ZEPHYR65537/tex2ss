@@ -82,6 +82,41 @@ tests =
           assertBool
             "internal generated-fragment marker leaked to latexmk"
             (not $ "texssgeneratedpandocblocks" `Text.isInfixOf` source)
+    , testCase "compiles bundle media paths relative to the bundle directory" $
+        withSystemTempDirectory "tex2ss-pdf" $ \root -> do
+          initializeFixture root
+          let content = root </> "content"
+              media = content </> "media" </> "img"
+          createDirectoryIfMissing True media
+          ByteString.writeFile (media </> "figure.png") "fake-image"
+          TextIO.writeFile
+            (content </> "index.tex")
+            ( Text.unlines
+                [ "\\documentclass{article}"
+                , "\\usepackage{graphicx}"
+                , "\\begin{document}"
+                , "\\includegraphics{media/img/figure.png}"
+                , "\\end{document}"
+                ]
+            )
+          invocationSeen <- newIORef Nothing
+          let runner _ invocation = do
+                source <- TextIO.readFile (invocationSourcePath invocation)
+                modifyIORef'
+                  invocationSeen
+                  (const $ Just (invocationWorkingDirectory invocation, source))
+                createDirectoryIfMissing True (invocationOutputDirectory invocation)
+                ByteString.writeFile (invocationExpectedPdf invocation) "%PDF-media"
+                pure (LatexRunResult ExitSuccess "" "")
+          buildPdfWith fakeEnvironment runner root False >>= (@?= Right True)
+          readIORef invocationSeen
+            >>= (@?= Just (content, Text.unlines
+              [ "\\documentclass{article}"
+              , "\\usepackage{graphicx}"
+              , "\\begin{document}"
+              , "\\includegraphics{media/img/figure.png}"
+              , "\\end{document}"
+              ]))
     , testCase "preserves the last PDF snapshot when latexmk fails" $
         withSystemTempDirectory "tex2ss-pdf" $ \root -> do
           initializeFixture root

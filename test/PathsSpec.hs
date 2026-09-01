@@ -17,6 +17,10 @@ tests =
     , testCase "rejects uppercase and traversal" $ do
         assertBool "uppercase should fail" (either (const True) (const False) $ validateSlot "Posts")
         assertBool "traversal should fail" (either (const True) (const False) $ validateSlot "posts/../secret")
+    , testCase "rejects Windows device names in portable slots" $ do
+        assertBool "CON should fail" (either (const True) (const False) $ validateSlot "con")
+        assertBool "COM1 should fail" (either (const True) (const False) $ validateSlot "posts/com1")
+        assertBool "LPT9 should fail" (either (const True) (const False) $ validateSlot "lpt9")
     , testCase "rejects parent paths" $
         assertBool "parent path should fail" (either (const True) (const False) $ validateRelativePath "../secret")
     , testCase "uses the slot leaf as the default PDF name" $ do

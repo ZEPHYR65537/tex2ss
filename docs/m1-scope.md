@@ -10,7 +10,9 @@ The M1 baseline intentionally did not freeze or emulate unfinished contracts:
 - generators, post analyzers, virtual bundles, and virtual routes were not
   part of the M1 contract.
 - deploy providers and deploy Lua scripts are not exposed.
-- selective slot/regex builds are not exposed; `--all` is the default.
+- selective slot/regex and force-rebuild flags are not exposed. A normal build
+  considers every bundle selected by visibility while retaining incremental
+  caches; there is no misleading no-op `--all` flag.
 - unsupported contentful RawTeX must be consumed by an ordered filter or the
   page fails instead of silently losing semantics.
 

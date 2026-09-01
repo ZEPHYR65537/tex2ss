@@ -16,8 +16,9 @@ controlled include expansion + deferred LaTeX generator fragments
                   -> ordered in-process Lua filters
                   -> optional post_analyzer AnalysisExport snapshot
                   -> residual RawTeX validation
+                  -> TOC derived from the final filtered AST
                   -> Pandoc HTML5 writer
-                  -> Hakyll template and route
+                  -> Hakyll template (`$body$` + `$toc$`) and route
                   |
                   v
        .tex2ss/work/public candidate
@@ -62,6 +63,13 @@ The Hakyll dependency is compiled with `-usePandoc`. tex2ss links Pandoc 3.11
 and `pandoc-lua-engine` directly, so there is one documented Pandoc adapter and
 no Pandoc CLI process per fragment or page.
 
+The adapter starts from Pandoc's default LaTeX reader extension set (including
+LaTeX macro expansion and automatic identifiers) and additionally preserves
+unsupported LaTeX as raw nodes for explicit filters or diagnostics. HTML body
+and TOC fragments are both written from the same post-filter AST with wrapping
+disabled, so a filter that changes a heading also changes `$toc$` without a
+second read or a second Pandoc process.
+
 ## SiteIndex and incremental correctness
 
 SiteIndex contains every valid physical bundle, including drafts, before any
@@ -105,6 +113,11 @@ only the selected `pdflatex`, `xelatex`, or `lualatex`, reports their paths and
 versions, and runs the same recipe on a minimal document. The other two engines
 need not be installed. Finding commands on `PATH` alone is therefore not
 considered a healthy LaTeX environment.
+
+Bundle-local media paths use one source convention for both targets. A LaTeX
+reference such as `media/img/figure.png` resolves from the bundle directory for
+PDF compilation; HTML publication copies that subtree beside the bundle route,
+so the Pandoc-produced relative URL resolves from the generated page as well.
 
 ## Trusted Lua
 

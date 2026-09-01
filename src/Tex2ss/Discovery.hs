@@ -8,6 +8,7 @@ import Control.Exception (IOException, try)
 import Control.Monad (foldM)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory
@@ -44,15 +45,17 @@ discoverBundlesUnchecked paths = do
     then pure $ Left [diagnosticAt Error "project.content-missing" contentRoot "content directory does not exist"]
     else do
       canonicalRoot <- canonicalizePath contentRoot
-      (problems, bundles) <- walk canonicalRoot canonicalRoot
+      (problems, bundles) <- walk canonicalRoot Set.empty canonicalRoot
       let allProblems = problems <> duplicateRouteDiagnostics bundles
       pure $ if null allProblems then Right bundles else Left allProblems
 
-walk :: FilePath -> FilePath -> IO ([Diagnostic], [Bundle])
-walk root directory = do
+walk :: FilePath -> Set.Set FilePath -> FilePath -> IO ([Diagnostic], [Bundle])
+walk root visited directory = do
   boundary <- canonicalizePath directory
   if not (inside root boundary)
     then pure ([diagnosticAt Error "bundle.path-escape" directory "directory escapes content root"], [])
+    else if Set.member boundary visited
+      then pure ([diagnosticAt Error "bundle.directory-cycle" directory "directory resolves to an already visited content location"], [])
     else do
       let indexPath = directory </> "index.tex"
           metaPath = directory </> "meta.json"
@@ -71,7 +74,7 @@ walk root directory = do
                 | child <- children
                 , not (pair == (True, True) && child `elem` reservedBundleTrees)
                 ]
-          nested <- traverseDirectoryChildren root childDirectories
+          nested <- traverseDirectoryChildren root (Set.insert boundary visited) childDirectories
           pure (fst current <> fst nested, snd current <> snd nested)
 
 loadCurrent :: FilePath -> FilePath -> FilePath -> FilePath -> IO ([Diagnostic], [Bundle])
@@ -99,8 +102,8 @@ slotFor root directory =
 listChildren :: FilePath -> IO [FilePath]
 listChildren = fmap sort . listDirectory
 
-traverseDirectoryChildren :: FilePath -> [FilePath] -> IO ([Diagnostic], [Bundle])
-traverseDirectoryChildren root =
+traverseDirectoryChildren :: FilePath -> Set.Set FilePath -> [FilePath] -> IO ([Diagnostic], [Bundle])
+traverseDirectoryChildren root visited =
   foldM step ([], [])
  where
   step accumulated child = do
@@ -108,7 +111,7 @@ traverseDirectoryChildren root =
     if not isDirectory
       then pure accumulated
       else do
-        found <- walk root child
+        found <- walk root visited child
         pure (fst accumulated <> fst found, snd accumulated <> snd found)
 
 inside :: FilePath -> FilePath -> Bool

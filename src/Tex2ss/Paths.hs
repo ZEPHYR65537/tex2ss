@@ -96,10 +96,24 @@ isPortableName :: Text -> Bool
 isPortableName value =
   case Text.uncons value of
     Nothing -> False
-    Just (first, rest) -> validFirst first && Text.all validRest rest
+    Just (first, rest) ->
+      validFirst first
+        && Text.all validRest rest
+        && not (isWindowsDeviceName value)
  where
   validFirst character = isAsciiLower character || isDigit character
   validRest character = validFirst character || character == '_' || character == '-'
+
+isWindowsDeviceName :: Text -> Bool
+isWindowsDeviceName value =
+  value `elem` ["con", "prn", "aux", "nul"]
+    || deviceNumber "com"
+    || deviceNumber "lpt"
+ where
+  deviceNumber prefix =
+    case Text.stripPrefix prefix value of
+      Just suffix -> suffix `elem` map (Text.pack . show) ([1 .. 9] :: [Int])
+      Nothing -> False
 
 validateRelativePath :: FilePath -> Either Diagnostic FilePath
 validateRelativePath path

@@ -200,7 +200,6 @@ buildParser =
   Build
     <$> option buildTargetReader (long "format" <> metavar "html|pdf" <> value Html <> showDefault)
     <*> switch (long "include-drafts" <> help "Include draft bundles")
-    <* switch (long "all" <> help "Build all physical bundles (the M1 default)")
 
 buildTargetReader :: ReadM BuildTarget
 buildTargetReader = eitherReader $ \rawFormat ->

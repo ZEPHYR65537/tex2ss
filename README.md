@@ -38,6 +38,11 @@ slot-shaped, recognizable files such as `pdfs/index.pdf` and
 `pdfs/guide/guide.pdf` only after the complete candidate succeeds. A bundle can
 override its basename with the optional `meta.json` field `pdf_name`.
 
+HTML templates can render `$body$` and a `$toc$` produced from the same filtered
+Pandoc AST. Bundle media keeps one relative convention across targets: for
+example, `\includegraphics{media/img/figure.png}` is compiled from the bundle
+directory for PDF and published beside that bundle's HTML route.
+
 The experimental bundle-local pre-generator receives a read-only SiteIndex and
 explicitly selected descendant `AnalysisExport` values, then returns named block
 fragments. A fragment contains either deferred LaTeX or portable

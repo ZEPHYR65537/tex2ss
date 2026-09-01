@@ -337,7 +337,7 @@ pageCompiler plan bundle = do
       selectedTemplate = configTemplates config Map.! templateAlias
       templateIdentifier = projectIdentifier paths (templatePath paths selectedTemplate)
   makeItem (Text.unpack $ renderedHtml compiled)
-    >>= loadAndApplyTemplate templateIdentifier (pageContext config bundle)
+    >>= loadAndApplyTemplate templateIdentifier (pageContext config bundle $ renderedToc compiled)
 
 decodeAnalysisSnapshot :: String -> Compiler (Maybe AnalysisExport)
 decodeAnalysisSnapshot encoded =
@@ -345,8 +345,8 @@ decodeAnalysisSnapshot encoded =
     Left problem -> fail ("invalid tex2ss analysis snapshot: " <> problem)
     Right value -> pure value
 
-pageContext :: SiteConfig -> Bundle -> Context String
-pageContext config bundle =
+pageContext :: SiteConfig -> Bundle -> Text.Text -> Context String
+pageContext config bundle toc =
   mconcat
     ( [ bodyField "body"
       , constField "title" (Text.unpack $ metadataTitle metadata)
@@ -359,6 +359,7 @@ pageContext config bundle =
       , constField "site_description" (Text.unpack $ siteDescription site)
       , constField "base_url" (Text.unpack $ siteBaseUrl site)
       , constField "lang" (Text.unpack $ siteLang site)
+      , constField "toc" (Text.unpack toc)
       ]
         <> map customField (Map.toAscList $ metadataData metadata)
     )

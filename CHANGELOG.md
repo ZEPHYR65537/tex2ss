@@ -20,3 +20,11 @@
   exports from filtered Pandoc AST, explicit ancestor namespace inputs, Hakyll
   analysis snapshots, deepest-first PDF scheduling, strict direction/size
   validation, and a shared HTML/PDF tree fixture.
+- Restore Pandoc's default LaTeX reader profile while preserving unsupported
+  raw LaTeX for filters, including macro expansion and automatic identifiers.
+- Expose `$toc$` to Hakyll templates from the final filtered AST without a
+  second parse, and keep HTML fragments deterministically unwrapped.
+- Harden portable slot names and recursive discovery against Windows device
+  names and directory-link cycles; remove the previously ignored `--all` flag.
+- Cover one bundle-relative media convention for route-shaped HTML output and
+  PDF compilation.

@@ -28,6 +28,7 @@ import Text.Pandoc
   , Pandoc (Pandoc)
   , PandocError
   , enableExtension
+  , getDefaultExtensions
   , nullMeta
   , readLaTeX
   , runIO
@@ -36,7 +37,7 @@ import Text.Pandoc
   )
 import Text.Pandoc.Class (PandocIO)
 import Text.Pandoc.Definition
-  ( Block (Para, Plain, RawBlock)
+  ( Block (BulletList, Para, Plain, RawBlock)
   , Format (..)
   , Inline (RawInline, Str)
   )
@@ -50,6 +51,7 @@ import Text.Pandoc.Options
   , WriterOptions (writerMathMethod, writerSectionDivs, writerWrapText)
   )
 import Text.Pandoc.Walk (query, walk)
+import Text.Pandoc.Writers.Shared (toTableOfContents)
 import Tex2ss.Analysis (AnalysisExport, runPostAnalyzer)
 import Tex2ss.Diagnostics (Diagnostic, Severity (Error), diagnosticAt)
 import Tex2ss.Generator
@@ -78,6 +80,7 @@ data PreparedBundle = PreparedBundle
 
 data RenderedBundle = RenderedBundle
   { renderedHtml :: Text
+  , renderedToc :: Text
   , renderedAnalysis :: Maybe AnalysisExport
   }
   deriving stock (Eq, Show)
@@ -223,12 +226,13 @@ runFilteredDocument :: FilePath -> [FilePath] -> PreparedBundle -> IO (Either [D
 runFilteredDocument sourcePath filters prepared = do
   let readerOptions =
         def
-          { readerExtensions = enableExtension Ext_raw_tex (readerExtensions def)
+          { readerExtensions = enableExtension Ext_raw_tex (getDefaultExtensions "latex")
           }
       writerOptions =
         def
           { writerMathMethod = MathJax ""
           , writerSectionDivs = True
+          , writerWrapText = WrapNone
           }
       environment = Environment readerOptions writerOptions
   operation <- try @PandocError . runIO $ do
@@ -265,11 +269,15 @@ writeHtmlDocument sourcePath filtered analysis = do
         def
           { writerMathMethod = MathJax ""
           , writerSectionDivs = True
+          , writerWrapText = WrapNone
           }
       normalized = normalizeTemplateOwnedLayout filtered
   operation <- try @PandocError . runIO $
     case residualRawTeX normalized of
-      [] -> writeHtml5String writerOptions normalized
+      [] -> do
+        html <- writeHtml5String writerOptions normalized
+        toc <- writeTableOfContents writerOptions normalized
+        pure (html, toc)
       leftovers -> failResidual leftovers
   pure $
     case operation of
@@ -277,7 +285,13 @@ writeHtmlDocument sourcePath filtered analysis = do
       Right result ->
         case result of
           Left problem -> Left [pandocDiagnostic sourcePath problem]
-          Right html -> Right (RenderedBundle html analysis)
+          Right (html, toc) -> Right (RenderedBundle html toc analysis)
+
+writeTableOfContents :: WriterOptions -> Pandoc -> PandocIO Text
+writeTableOfContents writerOptions (Pandoc _ blocks) =
+  case toTableOfContents writerOptions blocks of
+    BulletList [] -> pure ""
+    toc -> writeHtml5String writerOptions (Pandoc nullMeta [toc])
 
 splicePandocFragments :: Map Text [Block] -> Pandoc -> Either Text Pandoc
 splicePandocFragments fragments document
@@ -303,7 +317,7 @@ splicePandocFragments fragments document
     Plain [Str marker] | Just blocks <- Map.lookup marker byMarker -> blocks
     block -> [block]
 
-failResidual :: [(Text, Text)] -> PandocIO Text
+failResidual :: [(Text, Text)] -> PandocIO value
 failResidual leftovers =
   throwError . PandocAppError $
     "unsupported raw TeX remains after filters: "

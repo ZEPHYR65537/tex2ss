@@ -11,7 +11,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase)
 import Tex2ss.Diagnostics (Diagnostic (..))
-import Tex2ss.Pandoc (renderBundleHtml)
+import Tex2ss.Pandoc (RenderedBundle (renderedToc), renderBundleHtml, renderBundleHtmlWith)
 import Tex2ss.Paths (mkProjectPaths)
 import Tex2ss.SiteIndex (buildSiteIndex)
 import Tex2ss.Types
@@ -65,6 +65,31 @@ tests =
               assertBool "first deferred fragment is missing" ("First deferred paragraph" `Text.isInfixOf` html)
               assertBool "second deferred fragment is missing" ("Second deferred paragraph" `Text.isInfixOf` html)
               assertBool "internal marker leaked" (not $ "texssgeneratedpandocblocks" `Text.isInfixOf` html)
+    , testCase "uses the Pandoc LaTeX reader profile for author macros" $
+        withSystemTempDirectory "tex2ss-pandoc-macros" $ \root -> do
+          (configured, bundle, _) <- fixture root
+          let config = configured {configFilters = []}
+          TextIO.writeFile (bundleIndexPath bundle) macroDocument
+          result <- renderBundleHtml (mkProjectPaths root) config (buildSiteIndex [bundle]) bundle
+          case result of
+            Left _ -> assertBool "expected LaTeX macro expansion" False
+            Right html ->
+              assertBool
+                "expanded macro did not become semantic HTML"
+                ("<strong>Expanded macro</strong>" `Text.isInfixOf` html)
+    , testCase "derives the template TOC from the filtered document" $
+        withSystemTempDirectory "tex2ss-pandoc-toc" $ \root -> do
+          (config, bundle, filterPath) <- fixture root
+          TextIO.writeFile (bundleIndexPath bundle) sectionDocument
+          TextIO.writeFile filterPath headingFilter
+          result <- renderBundleHtmlWith (mkProjectPaths root) config (buildSiteIndex [bundle]) [] bundle
+          case result of
+            Left _ -> assertBool "expected TOC derivation" False
+            Right rendered -> do
+              assertBool
+                ("filtered heading missing from TOC: " <> Text.unpack (renderedToc rendered))
+                ("Filtered heading" `Text.isInfixOf` renderedToc rendered)
+              assertBool "TOC did not link to the generated heading id" ("#filtered-heading" `Text.isInfixOf` renderedToc rendered)
     ]
 
 fixture :: FilePath -> IO (SiteConfig, Bundle, FilePath)
@@ -140,5 +165,35 @@ generatedBlockFilter =
     , "  if pandoc.utils.stringify(element) == 'Generated semantic block' then"
     , "    return pandoc.Para({ pandoc.Str('Filtered semantic block') })"
     , "  end"
+    , "end"
+    ]
+
+macroDocument :: Text.Text
+macroDocument =
+  Text.unlines
+    [ "\\documentclass{article}"
+    , "\\newcommand{\\important}[1]{\\textbf{#1}}"
+    , "\\begin{document}"
+    , "\\important{Expanded macro}"
+    , "\\end{document}"
+    ]
+
+sectionDocument :: Text.Text
+sectionDocument =
+  Text.unlines
+    [ "\\documentclass{article}"
+    , "\\begin{document}"
+    , "\\section{Original heading}"
+    , "Body."
+    , "\\end{document}"
+    ]
+
+headingFilter :: Text.Text
+headingFilter =
+  Text.unlines
+    [ "function Header(element)"
+    , "  element.content = pandoc.Inlines({ pandoc.Str('Filtered heading') })"
+    , "  element.identifier = 'filtered-heading'"
+    , "  return element"
     , "end"
     ]
