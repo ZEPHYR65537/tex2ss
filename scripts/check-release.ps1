@@ -15,11 +15,15 @@ if ($forbidden.Count -gt 0) {
 
 $windowsHome = 'C:' + '\Users\'
 $unixHome = '/ho' + 'me/'
-$localPathPattern = [regex]::Escape($windowsHome) + '|' + $unixHome + '[^/]+/'
-$pathHits = @(git grep -n -I -E $localPathPattern -- . 2>$null)
-if ($LASTEXITCODE -notin @(0, 1)) {
-  throw "Could not scan tracked files for local absolute paths"
-}
+$localPathPattern = [regex]::new([regex]::Escape($windowsHome) + '|' + $unixHome + '[^/]+/')
+$pathHits = @(
+  foreach ($path in $tracked) {
+    $bytes = [System.IO.File]::ReadAllBytes((Join-Path $PWD $path))
+    if ([Array]::IndexOf($bytes, [byte] 0) -ge 0) { continue }
+    $content = [System.Text.Encoding]::UTF8.GetString($bytes)
+    if ($localPathPattern.IsMatch($content)) { $path }
+  }
+)
 if ($pathHits.Count -gt 0) {
   throw "Release boundary contains local absolute paths:`n$($pathHits -join "`n")"
 }
