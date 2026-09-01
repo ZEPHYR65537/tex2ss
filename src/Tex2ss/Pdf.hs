@@ -5,7 +5,9 @@ module Tex2ss.Pdf
   , LatexInvocation (..)
   , LatexRunResult (..)
   , buildPdf
+  , buildPdfSelected
   , buildPdfWith
+  , buildPdfWithSelection
   , diagnoseLatexEnvironment
   , inspectLatexEnvironment
   , inspectLatexEnvironmentWith
@@ -15,7 +17,7 @@ module Tex2ss.Pdf
   ) where
 
 import Control.Exception (IOException, finally, try)
-import Control.Monad (foldM, when)
+import Control.Monad (foldM, forM, when)
 import Crypto.Hash (Digest, SHA256, hash, hashlazy)
 import Data.Aeson
   ( FromJSON (parseJSON)
@@ -36,7 +38,10 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
+import Data.Version (showVersion)
 import Data.Ord (Down (Down))
+import Data.Maybe (catMaybes)
+import qualified Data.Set as Set
 import System.Directory
   ( copyFile
   , createDirectory
@@ -61,8 +66,9 @@ import System.Process
   , readCreateProcessWithExitCode
   , readProcessWithExitCode
   )
-import Tex2ss.Build (BuildPlan (..), prepareBuildPlan)
-import Tex2ss.Analysis (AnalysisExport, selectDescendantExports)
+import Text.Pandoc (pandocVersion)
+import qualified Paths_tex2ss
+import Tex2ss.Build (BuildPlan (..), prepareBuildPlanWith)
 import Tex2ss.Config (loadSiteConfig)
 import Tex2ss.Diagnostics
   ( Diagnostic (diagnosticHint)
@@ -82,10 +88,12 @@ import Tex2ss.Pandoc
   , prepareBundleSourceWith
   , renderBundleLaTeX
   )
+import Tex2ss.Plugin (PluginAnalysis)
 import Tex2ss.Paths (mkProjectPaths)
 import Tex2ss.Types
   ( Bundle (..)
-  , BundleMetadata (metadataAnalysisInputs, metadataPdfName)
+  , BuildSelector (SelectAll)
+  , BundleMetadata (metadataPdfName)
   , PdfEngine (..)
   , ProjectPaths (..)
   , SiteConfig (configPdfEngine)
@@ -158,7 +166,15 @@ instance FromJSON PdfState where
 type LatexRunner = LatexEnvironment -> LatexInvocation -> IO LatexRunResult
 
 buildPdf :: FilePath -> Bool -> IO (Either [Diagnostic] Bool)
-buildPdf root includeDrafts = do
+buildPdf root includeDrafts = buildPdfSelected root includeDrafts [SelectAll] False
+
+buildPdfSelected
+  :: FilePath
+  -> Bool
+  -> [BuildSelector]
+  -> Bool
+  -> IO (Either [Diagnostic] Bool)
+buildPdfSelected root includeDrafts selectors force = do
   let paths = mkProjectPaths root
   configResult <- loadSiteConfig (projectConfig paths)
   case configResult of
@@ -167,10 +183,21 @@ buildPdf root includeDrafts = do
       environment <- inspectLatexEnvironment (configPdfEngine config)
       case environment of
         Left problems -> pure (Left problems)
-        Right available -> buildPdfWith available runLatexmk root includeDrafts
+        Right available -> buildPdfWithSelection available runLatexmk root includeDrafts selectors force
 
 buildPdfWith :: LatexEnvironment -> LatexRunner -> FilePath -> Bool -> IO (Either [Diagnostic] Bool)
-buildPdfWith environment runner root includeDrafts = do
+buildPdfWith environment runner root includeDrafts =
+  buildPdfWithSelection environment runner root includeDrafts [SelectAll] False
+
+buildPdfWithSelection
+  :: LatexEnvironment
+  -> LatexRunner
+  -> FilePath
+  -> Bool
+  -> [BuildSelector]
+  -> Bool
+  -> IO (Either [Diagnostic] Bool)
+buildPdfWithSelection environment runner root includeDrafts selectors force = do
   let paths = mkProjectPaths root
       lockDirectory = projectState paths </> "build.lock"
   createDirectoryIfMissing True (projectState paths)
@@ -184,7 +211,7 @@ buildPdfWith environment runner root includeDrafts = do
         ]
     Right () ->
       ( do
-          operation <- try @IOException (buildPdfUnlocked environment runner root includeDrafts)
+          operation <- try @IOException (buildPdfUnlocked environment runner root includeDrafts selectors force)
           pure $
             case operation of
               Left exception ->
@@ -193,9 +220,16 @@ buildPdfWith environment runner root includeDrafts = do
       )
         `finally` removeDirectory lockDirectory
 
-buildPdfUnlocked :: LatexEnvironment -> LatexRunner -> FilePath -> Bool -> IO (Either [Diagnostic] Bool)
-buildPdfUnlocked environment runner root includeDrafts = do
-  planResult <- prepareBuildPlan root includeDrafts
+buildPdfUnlocked
+  :: LatexEnvironment
+  -> LatexRunner
+  -> FilePath
+  -> Bool
+  -> [BuildSelector]
+  -> Bool
+  -> IO (Either [Diagnostic] Bool)
+buildPdfUnlocked environment runner root includeDrafts selectors force = do
+  planResult <- prepareBuildPlanWith root includeDrafts selectors force
   case planResult of
     Left problems -> pure (Left problems)
     Right plan -> do
@@ -214,39 +248,48 @@ buildPdfUnlocked environment runner root includeDrafts = do
             ]
         else do
           let paths = planPaths plan
-              candidate = pdfWorkDirectory paths
               temporary = pdfTemporaryDirectory paths
-          resetDirectory candidate
+          seeded <- seedPdfCandidate plan
           resetDirectory temporary
-          oldState <- loadPdfState (pdfStatePath paths)
-          let orderedBundles =
-                sortOn
-                  (Down . length . slotSegments . bundleSlot)
-                  (planBundles plan)
-          compiled <-
-            foldM
-              (compileBundle environment runner plan oldState)
-              (Right (Map.empty, []))
-              orderedBundles
-          case compiled of
+          case seeded of
             Left problems -> pure (Left problems)
-            Right (newEntries, _) -> do
-              writePdfState (pdfStatePath paths) (PdfState newEntries)
-              committed <- commitPdfSnapshot paths
-              case committed of
+            Right () -> do
+              oldState <- loadPdfState (pdfStatePath paths)
+              let expectedOutputs =
+                    Set.fromList
+                      [ pdfOutputPath (bundleSlot bundle) (metadataPdfName $ bundleMetadata bundle)
+                      | bundle <- planVisibleBundles plan
+                      ]
+                  retainedEntries = Map.restrictKeys (pdfStateOutputs oldState) expectedOutputs
+                  orderedBundles =
+                    sortOn
+                      (Down . length . slotSegments . bundleSlot)
+                      (planBundles plan)
+              compiled <-
+                foldM
+                  (compileBundle environment runner plan oldState force)
+                  (Right (retainedEntries, []))
+                  orderedBundles
+              case compiled of
                 Left problems -> pure (Left problems)
-                Right changed -> pure (Right changed)
+                Right (newEntries, _) -> do
+                  writePdfState (pdfStatePath paths) (PdfState newEntries)
+                  committed <- commitPdfSnapshot paths
+                  case committed of
+                    Left problems -> pure (Left problems)
+                    Right changed -> pure (Right changed)
 
 compileBundle
   :: LatexEnvironment
   -> LatexRunner
   -> BuildPlan
   -> PdfState
-  -> Either [Diagnostic] (Map FilePath PdfCacheEntry, [AnalysisExport])
+  -> Bool
+  -> Either [Diagnostic] (Map FilePath PdfCacheEntry, [PluginAnalysis])
   -> Bundle
-  -> IO (Either [Diagnostic] (Map FilePath PdfCacheEntry, [AnalysisExport]))
-compileBundle _ _ _ _ result@(Left _) _ = pure result
-compileBundle environment runner plan oldState (Right (entries, exports)) bundle = do
+  -> IO (Either [Diagnostic] (Map FilePath PdfCacheEntry, [PluginAnalysis]))
+compileBundle _ _ _ _ _ result@(Left _) _ = pure result
+compileBundle environment runner plan oldState force (Right (entries, exports)) bundle = do
   let paths = planPaths plan
       relativeOutput =
         pdfOutputPath
@@ -254,19 +297,27 @@ compileBundle environment runner plan oldState (Right (entries, exports)) bundle
           (metadataPdfName $ bundleMetadata bundle)
       publishedOutput = projectPdfs paths </> relativeOutput
       candidateOutput = pdfWorkDirectory paths </> relativeOutput
-      descendantExports =
-        selectDescendantExports
-          bundle
-          (metadataAnalysisInputs $ bundleMetadata bundle)
-          exports
-  prepared <- prepareBundleSourceWith paths (planSiteIndex plan) descendantExports bundle
+  prepared <-
+    prepareBundleSourceWith
+      paths
+      (planSiteIndex plan)
+      (planPluginPlan plan)
+      exports
+      bundle
   case prepared of
     Left problems -> pure (Left problems)
     Right preparedBundle -> do
-      analyzed <- analyzePreparedBundle paths (planConfig plan) bundle preparedBundle
+      analyzed <-
+        analyzePreparedBundle
+          paths
+          (planConfig plan)
+          (planSiteIndex plan)
+          (planPluginPlan plan)
+          bundle
+          preparedBundle
       case analyzed of
         Left problems -> pure (Left problems)
-        Right exported -> do
+        Right newAnalyses -> do
           lowered <- renderBundleLaTeX (bundleIndexPath bundle) preparedBundle
           case lowered of
             Left problems -> pure (Left problems)
@@ -278,7 +329,10 @@ compileBundle environment runner plan oldState (Right (entries, exports)) bundle
                   bundle
                   source
                   (preparedPandocFragments preparedBundle)
-              reusable <- cachedOutputIsReusable oldState relativeOutput fingerprint publishedOutput
+              reusable <-
+                if force
+                  then pure False
+                  else cachedOutputIsReusable oldState relativeOutput fingerprint publishedOutput
               if reusable
                 then do
                   createDirectoryIfMissing True (takeDirectory candidateOutput)
@@ -286,7 +340,7 @@ compileBundle environment runner plan oldState (Right (entries, exports)) bundle
                   outputDigest <- fileSha256 candidateOutput
                   pure . Right $
                     ( Map.insert relativeOutput (PdfCacheEntry fingerprint outputDigest) entries
-                    , maybe exports (: exports) exported
+                    , newAnalyses <> exports
                     )
                 else do
                   rendered <- compilePdfBundle environment runner paths bundle source candidateOutput
@@ -296,8 +350,53 @@ compileBundle environment runner plan oldState (Right (entries, exports)) bundle
                       outputDigest <- fileSha256 candidateOutput
                       pure . Right $
                         ( Map.insert relativeOutput (PdfCacheEntry fingerprint outputDigest) entries
-                        , maybe exports (: exports) exported
+                        , newAnalyses <> exports
                         )
+
+seedPdfCandidate :: BuildPlan -> IO (Either [Diagnostic] ())
+seedPdfCandidate plan = do
+  let paths = planPaths plan
+      candidate = pdfWorkDirectory paths
+      selectedSlots = Set.fromList (map bundleSlot $ planBundles plan)
+  resetDirectory candidate
+  if not (planSelective plan)
+    then pure (Right ())
+    else do
+      publishedExists <- doesDirectoryExist (projectPdfs paths)
+      if not publishedExists
+        then
+          pure . Left $
+            [ diagnosticAt
+                Error
+                "pdf.selective-needs-baseline"
+                (projectPdfs paths)
+                "selective PDF build requires an existing successful pdfs snapshot; run --which all first"
+            ]
+        else do
+          copied <- forM (planVisibleBundles plan) $ \bundle -> do
+            let relative = pdfOutputPath (bundleSlot bundle) (metadataPdfName $ bundleMetadata bundle)
+                source = projectPdfs paths </> relative
+                destination = candidate </> relative
+            exists <- doesFileExist source
+            if exists
+              then do
+                createDirectoryIfMissing True (takeDirectory destination)
+                copyFile source destination
+                pure Nothing
+              else
+                pure $
+                  if Set.member (bundleSlot bundle) selectedSlots
+                    then Nothing
+                    else
+                      Just
+                        ( diagnosticAt
+                            Error
+                            "pdf.selective-output-missing"
+                            source
+                            "an unselected bundle has no published PDF; run --which all to establish a complete baseline"
+                        )
+          let problems = catMaybes copied
+          pure $ if null problems then Right () else Left problems
 
 compilePdfBundle
   :: LatexEnvironment
@@ -451,7 +550,7 @@ runLatexmk environment invocation = do
       process =
         (proc (latexmkExecutable environment) arguments)
           { cwd = Just (invocationWorkingDirectory invocation)
-          , env = Just (withTexInputs (invocationLatexInputDirectories invocation) inherited)
+          , env = Just (withLatexSearchPaths (invocationLatexInputDirectories invocation) inherited)
           }
   operation <- try @IOException (readCreateProcessWithExitCode process "")
   pure $
@@ -557,13 +656,17 @@ latexLogExcerpt path = do
 takeLast :: Int -> [value] -> [value]
 takeLast count values = drop (max 0 $ length values - count) values
 
-withTexInputs :: [FilePath] -> [(String, String)] -> [(String, String)]
-withTexInputs directories inherited =
-  ("TEXINPUTS", joined) : filter ((/= "TEXINPUTS") . Text.toUpper . Text.pack . fst) inherited
+withLatexSearchPaths :: [FilePath] -> [(String, String)] -> [(String, String)]
+withLatexSearchPaths directories inherited =
+ foldr prepend inherited ["TEXINPUTS", "BIBINPUTS", "BSTINPUTS"]
  where
-  previous = snd <$> find ((== "TEXINPUTS") . Text.toUpper . Text.pack . fst) inherited
-  pieces = directories <> maybe [] (: []) previous <> [""]
-  joined = Text.unpack $ Text.intercalate (Text.singleton searchPathSeparator) (map Text.pack pieces)
+  prepend :: String -> [(String, String)] -> [(String, String)]
+  prepend variable current =
+    let normalized = Text.pack variable
+        previous = snd <$> find ((== normalized) . Text.toUpper . Text.pack . fst) current
+        pieces = directories <> maybe [] (: []) previous <> [""]
+        joined = Text.unpack $ Text.intercalate (Text.singleton searchPathSeparator) (map Text.pack pieces)
+     in (variable, joined) : filter ((/= normalized) . Text.toUpper . Text.pack . fst) current
 
 pdfInputFingerprint :: ToJSON generated => LatexEnvironment -> ProjectPaths -> Bundle -> Text -> generated -> IO Text
 pdfInputFingerprint environment paths bundle source generatedAst = do
@@ -574,6 +677,8 @@ pdfInputFingerprint environment paths bundle source generatedAst = do
         encode $
           object
             [ "recipe" .= ("latexmk-pdf-v3-engine-selection" :: Text)
+            , "tex2ss_version" .= showVersion Paths_tex2ss.version
+            , "pandoc_version" .= showVersion pandocVersion
             , "latexmk" .= latexmkVersion environment
             , "engine" .= renderPdfEngine (latexEngine environment)
             , "engine_version" .= latexEngineVersion environment

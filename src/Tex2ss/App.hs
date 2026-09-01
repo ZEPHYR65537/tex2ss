@@ -5,6 +5,7 @@ module Tex2ss.App
   ) where
 
 import qualified Data.Text as Text
+import Control.Applicative (many)
 import qualified Data.Text.IO as TextIO
 import GHC.IO.Encoding (setLocaleEncoding, utf8)
 import Options.Applicative
@@ -38,22 +39,24 @@ import System.Directory (getCurrentDirectory, makeAbsolute)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitWith)
 import System.FilePath (takeFileName)
 import System.IO (stderr)
-import Tex2ss.Build (BuildPlan (..), buildHtml, prepareBuildPlan)
+import Tex2ss.Build (BuildPlan (..), buildHtmlWith, prepareBuildPlan)
 import Tex2ss.Config (loadSiteConfig)
 import Tex2ss.Diagnostics
   ( Diagnostic
   , renderDiagnostics
   )
+import Tex2ss.Deploy (deployProject)
 import Tex2ss.Paths (findProjectRoot, mkProjectPaths, validateSlot)
 import Tex2ss.Pdf
   ( LatexEnvironment (..)
-  , buildPdf
+  , buildPdfSelected
   , diagnoseLatexEnvironment
   )
 import Tex2ss.Scaffold (initializeGitRepository, initializeProject, initializeSite, initializeView)
 import Tex2ss.Serve (serveProject)
 import Tex2ss.Types
-  ( BuildTarget (..)
+  ( BuildSelector (..)
+  , BuildTarget (..)
   , ProjectPaths (projectConfig)
   , SiteConfig (configPdfEngine)
   , renderPdfEngine
@@ -64,7 +67,8 @@ data Command
   | NewView Text.Text
   | Init (Maybe FilePath)
   | Doctor (Maybe FilePath)
-  | Build BuildTarget Bool
+  | Build BuildTarget Bool [BuildSelector] Bool
+  | Deploy Text.Text Bool
   | Serve String Int Bool
 
 main :: IO ()
@@ -118,18 +122,25 @@ runCommand commandValue =
                   <> ")"
               putStrLn "LaTeX compile probe succeeded"
               pure ExitSuccess
-    Build Pdf includeDrafts -> withProject Nothing $ \root -> do
-      result <- buildPdf root includeDrafts
+    Build Pdf includeDrafts selectors force -> withProject Nothing $ \root -> do
+      result <- buildPdfSelected root includeDrafts selectors force
       case result of
         Left problems -> reportProblems 4 problems
         Right True -> putStrLn "build succeeded; pdfs snapshot updated" >> pure ExitSuccess
         Right False -> putStrLn "build succeeded; pdfs snapshot unchanged" >> pure ExitSuccess
-    Build Html includeDrafts -> withProject Nothing $ \root -> do
-      result <- buildHtml root includeDrafts
+    Build Html includeDrafts selectors force -> withProject Nothing $ \root -> do
+      result <- buildHtmlWith root includeDrafts selectors force
       case result of
         Left problems -> reportProblems 4 problems
         Right True -> putStrLn "build succeeded; public snapshot updated" >> pure ExitSuccess
         Right False -> putStrLn "build succeeded; public snapshot unchanged" >> pure ExitSuccess
+    Deploy target dryRun -> withProject Nothing $ \root -> do
+      result <- deployProject root target dryRun
+      case result of
+        Left problems -> reportProblems 6 problems
+        Right () ->
+          putStrLn (if dryRun then "deploy dry-run succeeded" else "deploy succeeded")
+            >> pure ExitSuccess
     Serve host port includeDrafts -> withProject Nothing $ \root -> do
       result <- serveProject root host port includeDrafts
       case result of
@@ -170,6 +181,7 @@ commandParser =
         <> command "init" (info initParser $ progDesc "Initialize a project without overwriting files")
         <> command "doctor" (info doctorParser $ progDesc "Validate project structure and schemas")
         <> command "build" (info buildParser $ progDesc "Build an output snapshot")
+        <> command "deploy" (info deployParser $ progDesc "Build and run a configured deployment target")
         <> command "serve" (info serveParser $ progDesc "Build, watch, and serve the last successful snapshot")
     )
 
@@ -200,6 +212,8 @@ buildParser =
   Build
     <$> option buildTargetReader (long "format" <> metavar "html|pdf" <> value Html <> showDefault)
     <*> switch (long "include-drafts" <> help "Include draft bundles")
+    <*> many (option buildSelectorReader (long "which" <> metavar "all|slot:SLOT|regex:PATTERN" <> help "Select build seeds; repeat to form a union"))
+    <*> switch (long "force" <> help "Bypass compilation caches for the selected dependency closure")
 
 buildTargetReader :: ReadM BuildTarget
 buildTargetReader = eitherReader $ \rawFormat ->
@@ -207,6 +221,29 @@ buildTargetReader = eitherReader $ \rawFormat ->
     "html" -> Right Html
     "pdf" -> Right Pdf
     _ -> Left "format must be html or pdf"
+
+buildSelectorReader :: ReadM BuildSelector
+buildSelectorReader = eitherReader $ \raw ->
+  case raw of
+    "all" -> Right SelectAll
+    _ ->
+      case Text.stripPrefix "slot:" (Text.pack raw) of
+        Just selected ->
+          case validateSlot selected of
+            Left _ -> Left "slot selector must use slot:<portable-slot>; use slot:. for the root"
+            Right slot -> Right (SelectSlot slot)
+        Nothing ->
+          case Text.stripPrefix "regex:" (Text.pack raw) of
+            Just patternText
+              | not (Text.null patternText) -> Right (SelectRegex patternText)
+            _ -> Left "which must be all, slot:<slot>, or regex:<pattern>"
+
+deployParser :: Parser Command
+deployParser =
+  Deploy
+    . Text.pack
+    <$> strArgument (metavar "TARGET")
+    <*> switch (long "dry-run" <> help "Load and print the deployment plan without running commands")
 
 serveParser :: Parser Command
 serveParser =

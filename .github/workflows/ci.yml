@@ -23,20 +23,38 @@ jobs:
       - run: cabal update
       - run: cabal build all
       - run: cabal test all
+      - name: Check release boundary
+        shell: pwsh
+        run: ./scripts/check-release.ps1
 
   pdf-smoke:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - uses: haskell-actions/setup@v2
         with:
           ghc-version: 9.10.3
           cabal-version: 3.16.1.0
-      - run: sudo apt-get update
-      - run: sudo apt-get install -y latexmk texlive-latex-base
+      - name: Install TeX on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y latexmk poppler-utils texlive-latex-base texlive-latex-recommended
+      - name: Install TeX on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install miktex --yes --no-progress
+          $env:PATH = "C:\Program Files\MiKTeX\miktex\bin\x64;$env:PATH"
+          initexmf --admin --set-config-value=[MPM]AutoInstall=1
+          mpm --admin --update-db
+          mpm --admin --install=latexmk
       - run: cabal update
       - run: cabal build exe:tex2ss
-      - name: Run real pdfLaTeX doctor and build
+      - name: Run real pdfLaTeX doctor and build on Linux
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           exe="$(cabal list-bin exe:tex2ss)"
@@ -46,3 +64,37 @@ jobs:
           cd "$site"
           "$exe" build --format pdf
           test -f pdfs/index.pdf
+          cd "$GITHUB_WORKSPACE/examples/post-analysis-tree"
+          "$exe" doctor .
+          "$exe" build --format html
+          "$exe" build --format pdf
+          grep -q 'tex2ss-audio' public/chapter/index.html
+          pdftotext pdfs/index.pdf - | grep -q 'Grandchild source filtered'
+      - name: Run real pdfLaTeX doctor and build on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\Program Files\MiKTeX\miktex\bin\x64;$env:PATH"
+          $exe = cabal list-bin exe:tex2ss
+          $site = Join-Path $env:RUNNER_TEMP tex2ss-pdf-smoke
+          & $exe init $site
+          & $exe doctor $site
+          Push-Location $site
+          & $exe build --format pdf
+          if (-not (Test-Path pdfs/index.pdf)) { throw "PDF smoke output is missing" }
+          Pop-Location
+          $example = Join-Path $env:GITHUB_WORKSPACE "examples/post-analysis-tree"
+          Push-Location $example
+          & $exe build --format html
+          if (-not (Select-String -Path public/chapter/index.html -Pattern "tex2ss-audio" -Quiet)) {
+            throw "Semantic HTML fixture is missing"
+          }
+          foreach ($engine in @("pdflatex", "xelatex", "lualatex")) {
+            $config = Get-Content config.json -Raw | ConvertFrom-Json
+            $config.pdf_engine = $engine
+            $config | ConvertTo-Json -Depth 20 | Set-Content config.json -Encoding utf8
+            & $exe doctor .
+            & $exe build --format pdf
+            if (-not (Test-Path pdfs/index.pdf)) { throw "$engine fixture PDF is missing" }
+          }
+          Pop-Location

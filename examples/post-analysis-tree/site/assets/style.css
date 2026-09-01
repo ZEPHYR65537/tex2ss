@@ -1,3 +1,4 @@
 :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
 main { max-width: 72ch; margin: 0 auto; padding: 3rem 1.25rem; line-height: 1.65; }
-
+.tex2ss-equation { align-items: center; display: flex; gap: 1rem; justify-content: center; }
+.tex2ss-equation-number { margin-left: auto; }

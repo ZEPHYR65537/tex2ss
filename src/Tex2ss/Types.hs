@@ -2,10 +2,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Tex2ss.Types
-  ( AnalyzerSpec (..)
+  ( BuildSelector (..)
   , BuildTarget (..)
   , Bundle (..)
   , BundleMetadata (..)
+  , DeployTarget (..)
   , PageRef (..)
   , PdfEngine (..)
   , PdfName (..)
@@ -34,6 +35,12 @@ import GHC.Generics (Generic)
 import System.FilePath ((</>))
 
 data BuildTarget = Html | Pdf
+  deriving stock (Eq, Ord, Show, Generic)
+
+data BuildSelector
+  = SelectAll
+  | SelectSlot Slot
+  | SelectRegex Text
   deriving stock (Eq, Ord, Show, Generic)
 
 newtype Slot = Slot {slotSegments :: [Text]}
@@ -101,13 +108,13 @@ data SiteConfig = SiteConfig
   , configDefaultTemplate :: Text
   , configFilters :: [FilePath]
   , configPdfEngine :: PdfEngine
+  , configDeploy :: Map Text DeployTarget
   }
   deriving stock (Eq, Show, Generic)
 
-data AnalyzerSpec = AnalyzerSpec
-  { analyzerScript :: FilePath
-  , analyzerNamespace :: Text
-  , analyzerSchemaVersion :: Int
+data DeployTarget = DeployTarget
+  { deployScript :: FilePath
+  , deployData :: Map Text Value
   }
   deriving stock (Eq, Show, Generic)
 
@@ -118,12 +125,9 @@ data BundleMetadata = BundleMetadata
   , metadataDate :: Maybe Day
   , metadataTemplate :: Maybe Text
   , metadataVisibility :: Visibility
-  , metadataGenerator :: Maybe FilePath
   , metadataFilters :: [FilePath]
   , metadataData :: Map Text Value
   , metadataPdfName :: Maybe PdfName
-  , metadataPostAnalyzer :: Maybe AnalyzerSpec
-  , metadataAnalysisInputs :: [Text]
   }
   deriving stock (Eq, Show, Generic)
 
@@ -181,6 +185,9 @@ data ProjectPaths = ProjectPaths
   , projectTemplates :: FilePath
   , projectAssets :: FilePath
   , projectPandoc :: FilePath
+  , projectPlugins :: FilePath
+  , projectLatex :: FilePath
+  , projectDeploy :: FilePath
   , projectPublic :: FilePath
   , projectPdfs :: FilePath
   , projectState :: FilePath

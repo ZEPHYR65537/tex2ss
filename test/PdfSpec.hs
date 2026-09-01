@@ -229,31 +229,29 @@ initializeFixture root = do
 enableSemanticGenerator :: FilePath -> IO ()
 enableSemanticGenerator root = do
   let content = root </> "content"
-      extension = content </> "extension"
+      extension = content </> "extension" </> "semantic"
   createDirectoryIfMissing True extension
   TextIO.writeFile
     (content </> "meta.json")
-    "{\"schema_version\":1,\"title\":\"Home\",\"visibility\":\"published\",\"generator\":\"semantic.lua\"}"
+    "{\"schema_version\":1,\"title\":\"Home\",\"visibility\":\"published\"}"
   TextIO.writeFile
     (content </> "index.tex")
     ( Text.unlines
         [ "\\documentclass{article}"
         , "\\begin{document}"
-        , "\\tex2ssgenerated{semantic}"
+        , "\\texssgenerated{semantic}{semantic}"
         , "\\end{document}"
         ]
     )
   TextIO.writeFile
-    (extension </> "semantic.lua")
+    (extension </> "init.lua")
     ( Text.unlines
-        [ "function pre_generator(context)"
-        , "  return { fragments = { semantic = {"
-        , "    type = 'pandoc_blocks',"
-        , "    blocks = pandoc.Blocks({ pandoc.BulletList({ { pandoc.Plain({"
+        [ "local tex2ss = require 'tex2ss'"
+        , "return { generate = function(context)"
+        , "  return { semantic = tex2ss.blocks(pandoc.Blocks({ pandoc.BulletList({ { pandoc.Plain({"
         , "      pandoc.Str('Generated'), pandoc.Space(), pandoc.Emph({ pandoc.Str('semantic') })"
-        , "    }) } }) })"
-        , "  } } }"
-        , "end"
+        , "    }) } }) })) }"
+        , "end }"
         ]
     )
 

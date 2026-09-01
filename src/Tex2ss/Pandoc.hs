@@ -10,6 +10,8 @@ module Tex2ss.Pandoc
   , renderBundleHtml
   , renderBundleHtmlWith
   , renderBundleLaTeX
+  , runFilteredDocument
+  , runFilteredDocumentWithResources
   ) where
 
 import Control.Exception (try)
@@ -22,7 +24,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import Text.Pandoc
   ( Extension (Ext_raw_tex)
   , Pandoc (Pandoc)
@@ -35,11 +37,13 @@ import Text.Pandoc
   , writeHtml5String
   , writeLaTeX
   )
-import Text.Pandoc.Class (PandocIO)
+import Text.Pandoc.Citeproc (processCitations)
+import Text.Pandoc.Class (PandocIO, setResourcePath)
 import Text.Pandoc.Definition
   ( Block (BulletList, Para, Plain, RawBlock)
   , Format (..)
   , Inline (RawInline, Str)
+  , lookupMeta
   )
 import Text.Pandoc.Error (PandocError (PandocAppError), renderError)
 import Text.Pandoc.Filter (Environment (..))
@@ -52,22 +56,22 @@ import Text.Pandoc.Options
   )
 import Text.Pandoc.Walk (query, walk)
 import Text.Pandoc.Writers.Shared (toTableOfContents)
-import Tex2ss.Analysis (AnalysisExport, runPostAnalyzer)
 import Tex2ss.Diagnostics (Diagnostic, Severity (Error), diagnosticAt)
-import Tex2ss.Generator
+import Tex2ss.Plugin
   ( AssembledSource (..)
-  , GeneratorResult (GeneratorResult)
+  , PluginAnalysis
+  , PluginPlan
   , assembleGeneratedSource
-  , pandocFragmentMarker
-  , runPreGeneratorWith
+  , preparePluginPlan
+  , runPluginAnalyzers
+  , runPluginGenerators
   )
 import Tex2ss.Include (ExpandedSource (expandedText), expandBundleSource)
 import Tex2ss.Paths (resolveExistingUnder)
 import Tex2ss.Types
-  ( AnalyzerSpec (analyzerScript)
-  , Bundle (..)
-  , BundleMetadata (metadataFilters, metadataGenerator, metadataPostAnalyzer)
-  , ProjectPaths (projectPandoc)
+  ( Bundle (..)
+  , BundleMetadata (metadataFilters)
+  , ProjectPaths (projectLatex, projectPandoc)
   , SiteConfig (configFilters)
   , SiteIndex
   )
@@ -81,23 +85,29 @@ data PreparedBundle = PreparedBundle
 data RenderedBundle = RenderedBundle
   { renderedHtml :: Text
   , renderedToc :: Text
-  , renderedAnalysis :: Maybe AnalysisExport
+  , renderedAnalyses :: [PluginAnalysis]
   }
   deriving stock (Eq, Show)
 
 renderBundleHtml :: ProjectPaths -> SiteConfig -> SiteIndex -> Bundle -> IO (Either [Diagnostic] Text)
-renderBundleHtml paths config siteIndex bundle =
-  fmap (fmap renderedHtml) $ renderBundleHtmlWith paths config siteIndex [] bundle
+renderBundleHtml paths config siteIndex bundle = do
+  plan <- preparePluginPlan paths siteIndex [bundle]
+  case plan of
+    Left problems -> pure (Left problems)
+    Right pluginPlan ->
+      fmap (fmap renderedHtml) $
+        renderBundleHtmlWith paths config siteIndex pluginPlan [] bundle
 
 renderBundleHtmlWith
   :: ProjectPaths
   -> SiteConfig
   -> SiteIndex
-  -> [AnalysisExport]
+  -> PluginPlan
+  -> [PluginAnalysis]
   -> Bundle
   -> IO (Either [Diagnostic] RenderedBundle)
-renderBundleHtmlWith paths config siteIndex analysisExports bundle = do
-  source <- prepareBundleSourceWith paths siteIndex analysisExports bundle
+renderBundleHtmlWith paths config siteIndex pluginPlan analyses bundle = do
+  source <- prepareBundleSourceWith paths siteIndex pluginPlan analyses bundle
   globalFilters <- resolveFilters (projectPandoc paths) (configFilters config)
   localFilters <-
     resolveFilters
@@ -108,21 +118,25 @@ renderBundleHtmlWith paths config siteIndex analysisExports bundle = do
     (_, Left problems, _) -> pure (Left problems)
     (_, _, Left problems) -> pure (Left problems)
     (Right prepared, Right global, Right local) ->
-      runHtmlPipeline bundle (global <> local) prepared
+      runHtmlPipeline paths siteIndex pluginPlan bundle (global <> local) prepared
 
 prepareBundleSource :: ProjectPaths -> SiteIndex -> Bundle -> IO (Either [Diagnostic] PreparedBundle)
-prepareBundleSource paths siteIndex bundle =
-  prepareBundleSourceWith paths siteIndex [] bundle
+prepareBundleSource paths siteIndex bundle = do
+  plan <- preparePluginPlan paths siteIndex [bundle]
+  case plan of
+    Left problems -> pure (Left problems)
+    Right pluginPlan -> prepareBundleSourceWith paths siteIndex pluginPlan [] bundle
 
 prepareBundleSourceWith
   :: ProjectPaths
   -> SiteIndex
-  -> [AnalysisExport]
+  -> PluginPlan
+  -> [PluginAnalysis]
   -> Bundle
   -> IO (Either [Diagnostic] PreparedBundle)
-prepareBundleSourceWith _ siteIndex analysisExports bundle = do
+prepareBundleSourceWith _ siteIndex pluginPlan analyses bundle = do
   source <- expandBundleSource (bundleDirectory bundle) (bundleIndexPath bundle)
-  generated <- resolveGenerator
+  generated <- runPluginGenerators siteIndex pluginPlan analyses bundle
   pure $ do
     expanded <- source
     fragments <- generated
@@ -132,39 +146,34 @@ prepareBundleSourceWith _ siteIndex analysisExports bundle = do
         { preparedSource = assembledText assembled
         , preparedPandocFragments = assembledPandocFragments assembled
         }
- where
-  resolveGenerator =
-    case metadataGenerator (bundleMetadata bundle) of
-      Nothing -> pure (Right $ GeneratorResult mempty)
-      Just relative -> do
-        resolved <- resolveExistingUnder (bundleDirectory bundle </> "extension") relative
-        case resolved of
-          Left problem -> pure (Left [problem])
-          Right scriptPath -> runPreGeneratorWith scriptPath siteIndex analysisExports bundle
 
 analyzePreparedBundle
   :: ProjectPaths
   -> SiteConfig
+  -> SiteIndex
+  -> PluginPlan
   -> Bundle
   -> PreparedBundle
-  -> IO (Either [Diagnostic] (Maybe AnalysisExport))
-analyzePreparedBundle paths config bundle prepared =
-  case metadataPostAnalyzer (bundleMetadata bundle) of
-    Nothing -> pure (Right Nothing)
-    Just _ -> do
-      globalFilters <- resolveFilters (projectPandoc paths) (configFilters config)
-      localFilters <-
-        resolveFilters
-          (bundleDirectory bundle </> "extension")
-          (metadataFilters $ bundleMetadata bundle)
-      case (globalFilters, localFilters) of
-        (Left problems, _) -> pure (Left problems)
-        (_, Left problems) -> pure (Left problems)
-        (Right global, Right local) -> do
-          filtered <- runFilteredDocument (bundleIndexPath bundle) (global <> local) prepared
-          case filtered of
-            Left problems -> pure (Left problems)
-            Right document -> runConfiguredAnalyzer bundle document
+  -> IO (Either [Diagnostic] [PluginAnalysis])
+analyzePreparedBundle paths config siteIndex pluginPlan bundle prepared = do
+  globalFilters <- resolveFilters (projectPandoc paths) (configFilters config)
+  localFilters <-
+    resolveFilters
+      (bundleDirectory bundle </> "extension")
+      (metadataFilters $ bundleMetadata bundle)
+  case (globalFilters, localFilters) of
+    (Left problems, _) -> pure (Left problems)
+    (_, Left problems) -> pure (Left problems)
+    (Right global, Right local) -> do
+      filtered <-
+        runFilteredDocumentWithResources
+          (pandocResourcePaths paths bundle)
+          (bundleIndexPath bundle)
+          (global <> local)
+          prepared
+      case filtered of
+        Left problems -> pure (Left problems)
+        Right document -> runPluginAnalyzers siteIndex pluginPlan bundle document
 
 renderBundleLaTeX :: FilePath -> PreparedBundle -> IO (Either [Diagnostic] Text)
 renderBundleLaTeX sourcePath prepared = do
@@ -184,7 +193,7 @@ renderBundleLaTeX sourcePath prepared = do
           Left problem -> Left [pandocDiagnostic sourcePath problem]
           Right source -> Right source
  where
-  replaceFragment source name body = Text.replace (pandocFragmentMarker name) body source
+  replaceFragment source marker body = Text.replace marker body source
 
 insertPandocSnippetPrelude :: [Text] -> Text -> Text
 insertPandocSnippetPrelude snippets source
@@ -211,19 +220,33 @@ resolveFilters root filters = do
   let (problems, paths) = partitionEithers resolved
   pure $ if null problems then Right paths else Left problems
 
-runHtmlPipeline :: Bundle -> [FilePath] -> PreparedBundle -> IO (Either [Diagnostic] RenderedBundle)
-runHtmlPipeline bundle filters prepared = do
-  filtered <- runFilteredDocument (bundleIndexPath bundle) filters prepared
+runHtmlPipeline :: ProjectPaths -> SiteIndex -> PluginPlan -> Bundle -> [FilePath] -> PreparedBundle -> IO (Either [Diagnostic] RenderedBundle)
+runHtmlPipeline paths siteIndex pluginPlan bundle filters prepared = do
+  filtered <-
+    runFilteredDocumentWithResources
+      (pandocResourcePaths paths bundle)
+      (bundleIndexPath bundle)
+      filters
+      prepared
   case filtered of
     Left problems -> pure (Left problems)
     Right document -> do
-      analyzed <- runConfiguredAnalyzer bundle document
+      analyzed <- runPluginAnalyzers siteIndex pluginPlan bundle document
       case analyzed of
         Left problems -> pure (Left problems)
-        Right analysis -> writeHtmlDocument (bundleIndexPath bundle) document analysis
+        Right analyses -> writeHtmlDocument (bundleIndexPath bundle) document analyses
 
 runFilteredDocument :: FilePath -> [FilePath] -> PreparedBundle -> IO (Either [Diagnostic] Pandoc)
-runFilteredDocument sourcePath filters prepared = do
+runFilteredDocument sourcePath =
+  runFilteredDocumentWithResources [takeDirectory sourcePath] sourcePath
+
+runFilteredDocumentWithResources
+  :: [FilePath]
+  -> FilePath
+  -> [FilePath]
+  -> PreparedBundle
+  -> IO (Either [Diagnostic] Pandoc)
+runFilteredDocumentWithResources resourcePaths sourcePath filters prepared = do
   let readerOptions =
         def
           { readerExtensions = enableExtension Ext_raw_tex (getDefaultExtensions "latex")
@@ -236,11 +259,17 @@ runFilteredDocument sourcePath filters prepared = do
           }
       environment = Environment readerOptions writerOptions
   operation <- try @PandocError . runIO $ do
+    setResourcePath resourcePaths
     parsed <- readLaTeX readerOptions [(sourcePath, preparedSource prepared)]
     document <-
       either (throwError . PandocAppError) pure $
         splicePandocFragments (preparedPandocFragments prepared) parsed
-    foldM (\current filterPath -> applyFilter environment ["html5"] filterPath current) document filters
+    filtered <- foldM (\current filterPath -> applyFilter environment ["html5"] filterPath current) document filters
+    case filtered of
+      Pandoc metadata _
+        | lookupMeta "bibliography" metadata /= Nothing
+            || lookupMeta "references" metadata /= Nothing -> processCitations filtered
+      _ -> pure filtered
   pure $
     case operation of
       Left problem -> Left [pandocDiagnostic sourcePath problem]
@@ -249,22 +278,19 @@ runFilteredDocument sourcePath filters prepared = do
           Left problem -> Left [pandocDiagnostic sourcePath problem]
           Right document -> Right document
 
-runConfiguredAnalyzer :: Bundle -> Pandoc -> IO (Either [Diagnostic] (Maybe AnalysisExport))
-runConfiguredAnalyzer bundle document =
-  case metadataPostAnalyzer (bundleMetadata bundle) of
-    Nothing -> pure (Right Nothing)
-    Just spec -> do
-      resolved <- resolveExistingUnder (bundleDirectory bundle </> "extension") (analyzerScript spec)
-      case resolved of
-        Left problem -> pure (Left [problem])
-        Right scriptPath -> fmap Just <$> runPostAnalyzer scriptPath spec bundle document
+pandocResourcePaths :: ProjectPaths -> Bundle -> [FilePath]
+pandocResourcePaths paths bundle =
+  [ bundleDirectory bundle
+  , bundleDirectory bundle </> "extension"
+  , projectLatex paths
+  ]
 
 writeHtmlDocument
   :: FilePath
   -> Pandoc
-  -> Maybe AnalysisExport
+  -> [PluginAnalysis]
   -> IO (Either [Diagnostic] RenderedBundle)
-writeHtmlDocument sourcePath filtered analysis = do
+writeHtmlDocument sourcePath filtered analyses = do
   let writerOptions =
         def
           { writerMathMethod = MathJax ""
@@ -285,7 +311,7 @@ writeHtmlDocument sourcePath filtered analysis = do
       Right result ->
         case result of
           Left problem -> Left [pandocDiagnostic sourcePath problem]
-          Right (html, toc) -> Right (RenderedBundle html toc analysis)
+          Right (html, toc) -> Right (RenderedBundle html toc analyses)
 
 writeTableOfContents :: WriterOptions -> Pandoc -> PandocIO Text
 writeTableOfContents writerOptions (Pandoc _ blocks) =
@@ -301,7 +327,7 @@ splicePandocFragments fragments document
           <> Text.intercalate ", " (Set.toAscList missing)
   | otherwise = Right (walk replaceBlocks document)
  where
-  byMarker = Map.fromList [(pandocFragmentMarker name, blocks) | (name, blocks) <- Map.toList fragments]
+  byMarker = fragments
   expected = Map.keysSet byMarker
   present = Set.fromList (query markerInBlock document)
   missing = expected `Set.difference` present

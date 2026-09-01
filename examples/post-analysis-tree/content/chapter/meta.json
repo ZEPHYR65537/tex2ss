@@ -2,11 +2,5 @@
   "schema_version": 1,
   "title": "Child",
   "visibility": "published",
-  "filters": ["mark.lua"],
-  "post_analyzer": {
-    "script": "outline.lua",
-    "namespace": "example.outline",
-    "schema_version": 1
-  }
+  "filters": ["mark.lua"]
 }
-

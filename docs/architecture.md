@@ -1,134 +1,114 @@
-# M1/M2 architecture
+# Architecture
 
-The build is deliberately split into a pure preflight model and an effectful
-compiler model.
+tex2ss separates a pure, complete preflight plan from effectful compilation.
 
 ```text
 strict config + physical bundle discovery
                   |
                   v
-       immutable global SiteIndex
+          frozen global SiteIndex
                   |
                   v
-controlled include expansion + deferred LaTeX generator fragments
-                  -> Pandoc readLaTeX (once per rebuilt bundle)
-                  -> direct Pandoc block splice
-                  -> ordered in-process Lua filters
-                  -> optional post_analyzer AnalysisExport snapshot
-                  -> residual RawTeX validation
-                  -> TOC derived from the final filtered AST
-                  -> Pandoc HTML5 writer
-                  -> Hakyll template (`$body$` + `$toc$`) and route
+scan physical index.tex plugin declarations
+resolve plugin directories + select strict descendants
                   |
                   v
-       .tex2ss/work/public candidate
+         complete acyclic BuildPlan
                   |
                   v
-   SHA-256 manifest + snapshot commit -> public/
-
-assembled LaTeX + in-process lowering of direct Pandoc blocks
-                  + descendant AnalysisExport fold (deepest slot first)
-                  + declared resource manifests
+each rebuilt document: include assembly -> one Pandoc LaTeX read
+                  -> one ordered-filter chain
+                  -> interested ancestor analyzers share final AST
+                  -> private snapshots keyed by owner/plugin/document
                   |
                   v
-       input fingerprint + PDF cache
+owner plugin generate -> named LaTeX/Pandoc fragments
+                  -> owner HTML writer + template + TOC
+                  -> or shared PDF source + latexmk
                   |
                   v
-structured latexmk invocation with the configured engine per changed bundle
-                  |
-                  v
-        .tex2ss/work/pdfs candidate
-                  |
-                  v
-   SHA-256 manifest + snapshot commit -> pdfs/
+candidate manifest -> transactional public/ or pdfs/ snapshot
 ```
 
-## Ownership boundaries
+## Boundaries
 
-- `meta.json` owns static page facts used by discovery and SiteIndex.
-- `index.tex` and `sources/*.tex` own document content and LaTeX semantics.
-- Pandoc owns the document AST, Lua filter model, and HTML conversion.
-- Generator output is explicit block-level `deferred_latex` or
-  `pandoc_blocks`; ordinary strings have no implicit reader or target format.
-- `post_analyzer` reads only the current filtered AST and returns a namespaced,
-  versioned open value. Metadata-declared `analysis_inputs` make only matching
-  strict-descendant exports visible to the current generator.
-- Hakyll owns tracked inputs, incremental compilation, templates, and routes.
-- `latexmk` and the selected `pdflatex`/`xelatex`/`lualatex` executable own TeX
-  execution for the single M2 PDF recipe.
-- tex2ss owns validation, paths, build planning, media routing, structured
-  process arguments, PDF fingerprints, and both final snapshot transactions.
+- `meta.json` owns static discovery facts and arbitrary static `data`.
+- `index.tex` and `sources/*.tex` own document semantics and content-plugin
+  placement.
+- SiteIndex describes all valid physical bundles, including drafts.
+- View-owned Lua plugins select strict descendants, map their final ASTs, and
+  fold private values into the owner's document.
+- Ordered Pandoc Lua filters remain independent AST transformations.
+- Pandoc owns parsing, AST semantics, TOC input, HTML writing, and portable
+  block lowering to LaTeX.
+- Hakyll owns HTML dependency snapshots and incremental scheduling.
+- `latexmk` plus the configured engine owns the single structured PDF recipe.
+- tex2ss owns validation, dependency closure, manifests, paths, caches,
+  diagnostics, selective-build policy, and transactional publication.
 
-The Hakyll dependency is compiled with `-usePandoc`. tex2ss links Pandoc 3.11
-and `pandoc-lua-engine` directly, so there is one documented Pandoc adapter and
-no Pandoc CLI process per fragment or page.
+tex2ss links Pandoc and `pandoc-lua-engine`; it does not start a Pandoc process
+for pages or fragments. The default LaTeX reader extensions include macro
+expansion and automatic identifiers while unsupported LaTeX is preserved for
+filters or diagnostics. Body and TOC are written from one final AST.
 
-The adapter starts from Pandoc's default LaTeX reader extension set (including
-LaTeX macro expansion and automatic identifiers) and additionally preserves
-unsupported LaTeX as raw nodes for explicit filters or diagnostics. HTML body
-and TOC fragments are both written from the same post-filter AST with wrapping
-disabled, so a filter that changes a heading also changes `$toc$` without a
-second read or a second Pandoc process.
+## Plugin graph and cache correctness
 
-## SiteIndex and incremental correctness
+Preflight expands each physical `index.tex` only far enough to find standalone
+`\texssgenerated{plugin}{fragment}` declarations. It resolves each plugin,
+runs `select` against the frozen SiteIndex, verifies strict-descendant edges,
+and therefore knows the full acyclic graph before parsing any document body.
 
-SiteIndex contains every valid physical bundle, including drafts, before any
-LaTeX document is parsed. Each page currently takes a coarse dependency on the
-complete set of `meta.json` files. This makes additions, removals, moves, and
-metadata changes correct for future whole-site generators. Finer query
-projection is an optimization after the generator API is accepted.
+A rebuilt document is assembled, read, and filtered once. The resulting AST is
+then passed through linked citeproc when bibliography metadata exists and
+offered to every interested ancestor plugin analyzer. A snapshot identity
+is `(owner slot, plugin id, analyzed slot)`, so values are never visible across
+plugins or owners. HTML stores them in Hakyll snapshots; PDF walks the same
+BuildPlan deepest-first. Each owner/plugin generator runs once and may satisfy
+multiple fragment occurrences.
 
-Includes and filters are explicit Hakyll content dependencies. Hakyll builds
-into a persistent candidate directory; tex2ss prunes stale routes, hashes the
-candidate, and only then swaps the canonical `public/` snapshot. Compiler
-failure therefore leaves the previous successful site intact.
+Plugin fingerprints include the complete selected plugin-directory manifest,
+SiteIndex metadata snapshot, exact selected slots and values, and tool/Pandoc
+versions. Metadata dependencies intentionally remain coarse at whole-site
+granularity; shared bibliography inputs are also tracked, while body
+dependencies cover only selected descendants. Public API
+file reads and values are reproducible; arbitrary side effects of trusted Lua
+are outside cache guarantees.
 
-For upward AST analysis, a page saves its successful optional export in a
-typed JSON Hakyll snapshot. An ancestor loads snapshots only for descendant
-bundles whose configured namespace appears in its `analysis_inputs`; this load
-both orders compilation and records the dependency. Slot-prefix direction makes
-the graph acyclic. The current page, siblings, and ancestors are never
-available. PDF uses the same rule over a deepest-slot-first plan before staging
-each ancestor's LaTeX. Analyzer failure aborts the candidate and preserves both
-published snapshots.
+Selective-build slot/regex selectors form seed unions. tex2ss adds content
+producers, selected descendants, affected owners, and other required edges.
+The candidate begins from the last successful output, so unrelated HTML/PDF
+files remain byte-for-byte intact. `--force` only recompiles the selected
+closure. A complete candidate is validated and committed together, while any
+failure preserves the previous published snapshot and analysis cache.
 
-PDF outputs retain the slot directory and use its final segment as the default
-basename (`index.pdf`, `guide/guide.pdf`); bundle metadata may override only the
-basename with `pdf_name`. Direct generated blocks are lowered by the linked
-Pandoc LaTeX writer, and required Pandoc snippet helper macros are inserted
-before `\\begin{document}`. Each fingerprint contains
-the lowered assembled source, canonical generated AST, selected engine name,
-engine/latexmk versions, fixed recipe options,
-shared `latex/`, bundle `media/`, and bundle-local `extension/latex/` manifests.
-An unchanged and unmodified published PDF is copied into a fresh candidate
-without invoking TeX.
-Every changed bundle compiles in `.tex2ss/tmp/pdf/`; only a complete candidate
-can atomically replace `pdfs/`.
+## HTML and PDF consistency
 
-The fixed recipe passes `-norc`, so host or project `.latexmkrc` files cannot
-change the selected engine or command underneath the recorded fingerprint.
+Deferred LaTeX fragments enter the owner's single LaTeX read for HTML and its
+assembled TeX source for PDF. Direct `pandoc.Blocks` are inserted before the
+owner filter chain and lowered through the same linked Pandoc version for PDF;
+raw target nodes are rejected. This keeps content semantic and target-neutral.
 
-`doctor` reads the strict config before probing TeX. It resolves `latexmk` and
-only the selected `pdflatex`, `xelatex`, or `lualatex`, reports their paths and
-versions, and runs the same recipe on a minimal document. The other two engines
-need not be installed. Finding commands on `PATH` alone is therefore not
-considered a healthy LaTeX environment.
+PDF fingerprints contain assembled source, generated AST, selected engine and
+tool versions, fixed `latexmk -norc` arguments, shared `latex/`, bundle media,
+and bundle-local `extension/latex/` manifests. Builds occur in private working
+directories and only a complete candidate replaces `pdfs/`.
 
-Bundle-local media paths use one source convention for both targets. A LaTeX
-reference such as `media/img/figure.png` resolves from the bundle directory for
-PDF compilation; HTML publication copies that subtree beside the bundle route,
-so the Pandoc-produced relative URL resolves from the generated page as well.
+Bundle media uses one convention: `media/img/figure.png` resolves from the
+bundle directory during TeX compilation and is copied beside that bundle's
+HTML route. PDF names keep the slot directory and default to the final segment.
 
-## Trusted Lua
+## Deployment and trusted Lua
 
-Configured filters are trusted project code and run through Pandoc's standard
-in-process Lua engine. M1 does not add a malicious-code sandbox. The lifecycle,
-ordered filter list, declared file dependencies, and typed outputs remain build
-contracts; undeclared filesystem, network, or process side effects are outside
-the reproducibility and cache guarantees.
+Filters, content plugins, and deployment scripts are trusted project code; no
+malicious-code sandbox is promised. Their public inputs, outputs, order, and
+tracked manifests are build contracts.
 
-Generated `pandoc_blocks` are decoded through Pandoc's Lua marshal instances,
-not JSON or generated markup. Raw blocks and raw inlines are rejected at this
-boundary so the same semantic AST remains portable to HTML and PDF. Internal
-source markers only bridge the single document reader call; they are removed
-before filters and never reach either writer.
+Deployment is deliberately outside the content graph. A named target first
+finishes an HTML incremental build, then loads one Lua script. The script sees
+the canonical successful `public/` path, its build manifest, target `data`, and
+a planning API, and returns executable/argv/cwd tuples. The host never accepts
+shell command strings. Dry-run validates and prints the plan without executing
+it. A deploy failure does not change the local successful build. Each attempt
+has one local record whose state moves from `started` to `success`, `failed`, or
+`dry-run`; it keeps start/finish timestamps plus the target, script hash, and
+successful build-manifest hash.

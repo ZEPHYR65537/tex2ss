@@ -32,10 +32,10 @@ import qualified Data.Text as Text
 import Data.Time (Day, defaultTimeLocale, parseTimeM)
 import System.FilePath (takeExtension)
 import Tex2ss.Diagnostics (Diagnostic, Severity (Error), diagnosticAt)
-import Tex2ss.Paths (isPortableName, resolveExistingUnder)
+import Tex2ss.Paths (isPortableName, resolveExistingUnder, validateRelativePath)
 import Tex2ss.Types
-  ( AnalyzerSpec (..)
-  , BundleMetadata (..)
+  ( BundleMetadata (..)
+  , DeployTarget (..)
   , PdfEngine (..)
   , PdfName (..)
   , ProjectPaths (..)
@@ -65,19 +65,6 @@ instance FromJSON PdfEngine where
       "lualatex" -> pure LuaLaTeX
       _ -> fail "pdf_engine must be 'pdflatex', 'xelatex', or 'lualatex'"
 
-instance FromJSON AnalyzerSpec where
-  parseJSON = withObject "post_analyzer" $ \object -> do
-    rejectUnknown "post_analyzer" analyzerKeys object
-    script <- object .: "script"
-    namespace <- object .: "namespace"
-    version <- object .: "schema_version"
-    validateExtension ".lua" "post_analyzer script" script
-    unless (validAnalysisNamespace namespace) $
-      fail "post_analyzer namespace must be a portable dotted name such as example.outline"
-    when (version < (1 :: Int)) $
-      fail "post_analyzer schema_version must be a positive integer"
-    pure $ AnalyzerSpec script namespace version
-
 instance FromJSON SiteSettings where
   parseJSON = withObject "site" $ \object -> do
     rejectUnknown "site" siteKeys object
@@ -105,13 +92,22 @@ instance FromJSON SiteConfig where
         <*> object .: "default_template"
         <*> object .:? "filters" .!= []
         <*> pure pdfEngine
+        <*> object .:? "deploy" .!= Map.empty
     unless (Map.member (configDefaultTemplate config) (configTemplates config)) $
       fail "default_template must name an entry in templates"
     when (Map.null (configTemplates config)) $
       fail "templates must contain at least one alias"
     traverse_ (validateExtension ".html" "template") (Map.elems $ configTemplates config)
     traverse_ (validateExtension ".lua" "filter") (configFilters config)
+    traverse_ validateDeployTarget (Map.toAscList $ configDeploy config)
     pure config
+
+instance FromJSON DeployTarget where
+  parseJSON = withObject "deploy target" $ \object -> do
+    rejectUnknown "deploy target" deployTargetKeys object
+    DeployTarget
+      <$> object .: "script"
+      <*> object .:? "data" .!= Map.empty
 
 instance FromJSON BundleMetadata where
   parseJSON = withObject "bundle metadata" $ \object -> do
@@ -122,29 +118,15 @@ instance FromJSON BundleMetadata where
     rawDate <- object .:? "date"
     parsedDate <- traverse parseDay rawDate
     filters <- object .:? "filters" .!= []
-    generator <- object .:? "generator"
-    postAnalyzer <- object .:? "post_analyzer"
-    analysisInputs <- object .:? "analysis_inputs" .!= []
     traverse_ (validateExtension ".lua" "filter") filters
-    traverse_ (validateExtension ".lua" "generator") generator
-    traverse_ validateAnalysisInput analysisInputs
-    when (length analysisInputs /= Set.size (Set.fromList analysisInputs)) $
-      fail "analysis_inputs must not contain duplicates"
-    when (not $ null analysisInputs) $
-      case generator of
-        Nothing -> fail "analysis_inputs requires generator"
-        Just _ -> pure ()
     BundleMetadata version title
       <$> object .:? "author"
       <*> pure parsedDate
       <*> object .:? "template"
       <*> object .:? "visibility" .!= Published
-      <*> pure generator
       <*> pure filters
       <*> object .:? "data" .!= Map.empty
       <*> object .:? "pdf_name"
-      <*> pure postAnalyzer
-      <*> pure analysisInputs
    where
     parseDay :: Text -> Aeson.Parser Day
     parseDay value =
@@ -179,7 +161,11 @@ validateConfigPaths paths config = do
     traverse
       (resolveExistingUnder $ projectPandoc paths)
       (configFilters config)
-  pure (lefts templateResults <> lefts filterResults)
+  deployResults <-
+    traverse
+      (resolveExistingUnder $ projectDeploy paths)
+      [drop 7 script | target <- Map.elems (configDeploy config), let script = deployScript target]
+  pure (lefts templateResults <> lefts filterResults <> lefts deployResults)
  where
   lefts = foldr (\value rest -> either (: rest) (const rest) value) []
 
@@ -200,33 +186,25 @@ validateExtension expected label path =
   unless (takeExtension path == expected) $
     fail $ label <> " path must end in " <> expected
 
-validateAnalysisInput :: Text -> Aeson.Parser ()
-validateAnalysisInput namespace =
-  unless (validAnalysisNamespace namespace) $
-    fail "analysis_inputs entries must be portable dotted names such as example.outline"
-
-validAnalysisNamespace :: Text -> Bool
-validAnalysisNamespace namespace =
-  case Text.splitOn "." namespace of
-    first : second : rest -> all validSegment (first : second : rest)
-    _ -> False
- where
-  validSegment segment =
-    case Text.uncons segment of
-      Nothing -> False
-      Just (first, remaining) -> validFirst first && Text.all validRest remaining
-  validFirst character =
-    ('a' <= character && character <= 'z') || ('0' <= character && character <= '9')
-  validRest character = validFirst character || character == '_' || character == '-'
+validateDeployTarget :: (Text, DeployTarget) -> Aeson.Parser ()
+validateDeployTarget (name, target) = do
+  unless (isPortableName name) $
+    fail "deploy target names must match [a-z0-9][a-z0-9_-]*"
+  validateExtension ".lua" "deploy script" (deployScript target)
+  case validateRelativePath (deployScript target) of
+    Left _ -> fail "deploy scripts must use portable relative paths beneath deploy/"
+    Right _ -> pure ()
+  unless ("deploy/" `Text.isPrefixOf` Text.pack (deployScript target)) $
+    fail "deploy scripts must be portable paths beneath deploy/"
 
 siteKeys :: Set Text
 siteKeys = Set.fromList ["title", "description", "base_url", "lang", "author", "email"]
 
 configKeys :: Set Text
-configKeys = Set.fromList ["schema_version", "site", "templates", "default_template", "filters", "pdf_engine"]
+configKeys = Set.fromList ["schema_version", "site", "templates", "default_template", "filters", "pdf_engine", "deploy"]
 
-analyzerKeys :: Set Text
-analyzerKeys = Set.fromList ["script", "namespace", "schema_version"]
+deployTargetKeys :: Set Text
+deployTargetKeys = Set.fromList ["script", "data"]
 
 metadataKeys :: Set Text
-metadataKeys = Set.fromList ["schema_version", "title", "author", "date", "template", "visibility", "generator", "filters", "data", "pdf_name", "post_analyzer", "analysis_inputs"]
+metadataKeys = Set.fromList ["schema_version", "title", "author", "date", "template", "visibility", "filters", "data", "pdf_name"]

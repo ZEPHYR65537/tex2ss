@@ -4,17 +4,18 @@ module ConfigSpec (tests) where
 
 import Control.Monad (forM_)
 import qualified Data.ByteString.Char8 as ByteString
+import qualified Data.Map.Strict as Map
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit ((@?=), assertBool, testCase)
 import Tex2ss.Config (loadBundleMetadata, loadSiteConfig)
 import Tex2ss.Types
-  ( AnalyzerSpec (AnalyzerSpec)
-  , BundleMetadata (metadataAnalysisInputs, metadataGenerator, metadataPdfName, metadataPostAnalyzer)
+  ( BundleMetadata (metadataPdfName)
+  , DeployTarget (DeployTarget)
   , PdfEngine (..)
   , PdfName (PdfName)
-  , SiteConfig (configPdfEngine)
+  , SiteConfig (configDeploy, configPdfEngine)
   )
 
 tests :: TestTree
@@ -56,36 +57,35 @@ tests =
           ByteString.writeFile path "{\"schema_version\":1,\"title\":\"x\",\"date\":\"31/08/2026\"}"
           result <- loadBundleMetadata path
           assertBool "expected invalid date" (either (const True) (const False) result)
-    , testCase "accepts a bundle-local Lua generator" $
+    , testCase "rejects the superseded generator and analyzer fields" $
         withSystemTempDirectory "tex2ss-meta" $ \root -> do
           let path = root </> "meta.json"
-          ByteString.writeFile path "{\"schema_version\":1,\"title\":\"x\",\"generator\":\"tree.lua\"}"
-          result <- loadBundleMetadata path
-          fmap metadataGenerator result @?= Right (Just "tree.lua")
-    , testCase "accepts an explicit post-analyzer contract" $
-        withSystemTempDirectory "tex2ss-meta" $ \root -> do
-          let path = root </> "meta.json"
-          ByteString.writeFile
-            path
-            "{\"schema_version\":1,\"title\":\"x\",\"generator\":\"tree.lua\",\"analysis_inputs\":[\"example.outline\"],\"post_analyzer\":{\"script\":\"outline.lua\",\"namespace\":\"example.outline\",\"schema_version\":1}}"
-          result <- loadBundleMetadata path
-          fmap metadataAnalysisInputs result @?= Right ["example.outline"]
-          fmap metadataPostAnalyzer result @?= Right (Just $ AnalyzerSpec "outline.lua" "example.outline" 1)
-    , testCase "rejects ambiguous analyzer contracts" $
-        withSystemTempDirectory "tex2ss-meta" $ \root -> do
-          let path = root </> "meta.json"
-              invalidDocuments =
-                [ "{\"schema_version\":1,\"title\":\"x\",\"analysis_inputs\":[\"example.outline\"]}"
-                , "{\"schema_version\":1,\"title\":\"x\",\"generator\":\"tree.lua\",\"analysis_inputs\":[\"outline\"]}"
-                , "{\"schema_version\":1,\"title\":\"x\",\"generator\":\"tree.lua\",\"analysis_inputs\":[\"example.outline\",\"example.outline\"]}"
-                , "{\"schema_version\":1,\"title\":\"x\",\"post_analyzer\":{\"script\":\"outline.txt\",\"namespace\":\"example.outline\",\"schema_version\":1}}"
-                , "{\"schema_version\":1,\"title\":\"x\",\"post_analyzer\":{\"script\":\"outline.lua\",\"namespace\":\"Example.outline\",\"schema_version\":1}}"
-                , "{\"schema_version\":1,\"title\":\"x\",\"post_analyzer\":{\"script\":\"outline.lua\",\"namespace\":\"example.outline\",\"schema_version\":0}}"
-                ]
-          forM_ invalidDocuments $ \document -> do
+          forM_
+            [ "{\"schema_version\":1,\"title\":\"x\",\"generator\":\"tree.lua\"}"
+            , "{\"schema_version\":1,\"title\":\"x\",\"analysis_inputs\":[\"example.outline\"]}"
+            , "{\"schema_version\":1,\"title\":\"x\",\"post_analyzer\":{\"script\":\"outline.lua\"}}"
+            ]
+            $ \document -> do
             ByteString.writeFile path document
             result <- loadBundleMetadata path
-            assertBool "expected invalid analyzer contract" (either (const True) (const False) result)
+            assertBool "expected superseded field rejection" (either (const True) (const False) result)
+    , testCase "accepts named deploy targets" $
+        withSystemTempDirectory "tex2ss-config" $ \root -> do
+          let path = root </> "config.json"
+          ByteString.writeFile
+            path
+            "{\"schema_version\":1,\"site\":{\"title\":\"Example\"},\"templates\":{\"default\":\"default.html\"},\"default_template\":\"default\",\"deploy\":{\"production\":{\"script\":\"deploy/production.lua\",\"data\":{\"project\":\"demo\"}}}}"
+          result <- loadSiteConfig path
+          fmap configDeploy result @?= Right (Map.singleton "production" $ DeployTarget "deploy/production.lua" (Map.singleton "project" "demo"))
+    , testCase "rejects deploy scripts outside the deploy directory" $
+        withSystemTempDirectory "tex2ss-config" $ \root -> do
+          let path = root </> "config.json"
+          forM_ ["production.lua", "deploy/../production.lua", "deploy\\production.lua"] $ \script -> do
+            ByteString.writeFile
+              path
+              (ByteString.pack $ "{\"schema_version\":1,\"site\":{\"title\":\"Example\"},\"templates\":{\"default\":\"default.html\"},\"default_template\":\"default\",\"deploy\":{\"production\":{\"script\":\"" <> escapeJson script <> "\"}}}")
+            result <- loadSiteConfig path
+            assertBool ("expected invalid deploy path: " <> script) (either (const True) (const False) result)
     , testCase "accepts a portable PDF filename stem" $
         withSystemTempDirectory "tex2ss-meta" $ \root -> do
           let path = root </> "meta.json"
@@ -116,3 +116,6 @@ configWithRawPdfEngine value =
     "{\"schema_version\":1,\"site\":{\"title\":\"Example\"},\"templates\":{\"default\":\"default.html\"},\"default_template\":\"default\",\"filters\":[],\"pdf_engine\":"
       <> value
       <> "}"
+
+escapeJson :: String -> String
+escapeJson = concatMap $ \character -> if character == '\\' then "\\\\" else [character]

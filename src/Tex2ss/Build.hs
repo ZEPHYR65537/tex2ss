@@ -3,7 +3,9 @@
 module Tex2ss.Build
   ( BuildPlan (..)
   , buildHtml
+  , buildHtmlWith
   , prepareBuildPlan
+  , prepareBuildPlanWith
   ) where
 
 import Control.Exception (IOException, finally, try)
@@ -12,10 +14,11 @@ import Data.Aeson (Value (..), eitherDecode, encode)
 import qualified Data.ByteString.Lazy.Char8 as LazyChar8
 import Data.List (isPrefixOf, isSuffixOf, nub, sort)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 import Data.Time (defaultTimeLocale, formatTime)
+import Data.Version (showVersion)
 import Hakyll
   ( Compiler
   , Configuration (..)
@@ -52,12 +55,14 @@ import qualified Hakyll.Core.Logger as Logger
 import Hakyll.Core.Runtime (RunMode (RunModeNormal), run)
 import System.Directory
   ( canonicalizePath
+  , copyFile
   , createDirectoryIfMissing
   , createDirectory
   , doesDirectoryExist
   , listDirectory
   , removeDirectory
   , removeFile
+  , removePathForcibly
   )
 import System.Exit (ExitCode (ExitFailure, ExitSuccess))
 import System.FilePath
@@ -70,11 +75,6 @@ import System.FilePath
   , (</>)
   )
 import Tex2ss.Config (loadSiteConfig, validateConfigPaths)
-import Tex2ss.Analysis
-  ( AnalysisExport
-  , analysisSnapshotName
-  , matchingAnalyzerBundles
-  )
 import Tex2ss.Diagnostics
   ( Diagnostic (diagnosticHint)
   , Severity (Error)
@@ -86,10 +86,20 @@ import Tex2ss.Discovery (discoverBundles)
 import Tex2ss.Include (ExpandedSource (expandedDependencies), expandBundleSource)
 import Tex2ss.Manifest (commitHtmlSnapshot, htmlWorkDirectory)
 import Tex2ss.Pandoc (RenderedBundle (..), renderBundleHtmlWith)
+import Tex2ss.Plugin
+  ( ContentPlugin (pluginOwner, pluginSelectedSlots)
+  , PluginAnalysis
+  , PluginPlan (pluginsByOwner)
+  , analysisSnapshotName
+  , ownerAnalysisSlots
+  , pluginDependencyDirectories
+  , pluginDependencyFiles
+  , preparePluginPlan
+  )
 import Tex2ss.Paths (mkProjectPaths, resolveExistingUnder)
 import Tex2ss.SiteIndex (buildSiteIndex)
 import Tex2ss.Types
-  ( AnalyzerSpec (analyzerScript)
+  ( BuildSelector (..)
   , Bundle (..)
   , BundleMetadata (..)
   , ProjectPaths (..)
@@ -97,25 +107,43 @@ import Tex2ss.Types
   , SiteIndex
   , SiteSettings (..)
   , Visibility (..)
+  , Slot
   , isVisible
   , renderSlot
   , slotOutputPath
   , slotRoute
   )
+import Text.Regex.TDFA (Regex, defaultCompOpt, defaultExecOpt, matchTest)
+import qualified Text.Regex.TDFA.String as Regex
+import Text.Pandoc (pandocVersion)
+import qualified Paths_tex2ss
 
 data BuildPlan = BuildPlan
   { planPaths :: ProjectPaths
   , planConfig :: SiteConfig
   , planSiteIndex :: SiteIndex
+  , planPluginPlan :: PluginPlan
   , planAllBundles :: [Bundle]
+  , planVisibleBundles :: [Bundle]
   , planBundles :: [Bundle]
   , planBundleDependencies :: Map.Map FilePath [FilePath]
   , planExpectedOutputs :: Set.Set FilePath
+  , planSelective :: Bool
+  , planForce :: Bool
   }
   deriving stock (Eq, Show)
 
 prepareBuildPlan :: FilePath -> Bool -> IO (Either [Diagnostic] BuildPlan)
-prepareBuildPlan root includeDrafts = do
+prepareBuildPlan root includeDrafts =
+  prepareBuildPlanWith root includeDrafts [SelectAll] False
+
+prepareBuildPlanWith
+  :: FilePath
+  -> Bool
+  -> [BuildSelector]
+  -> Bool
+  -> IO (Either [Diagnostic] BuildPlan)
+prepareBuildPlanWith root includeDrafts selectors force = do
   let paths = mkProjectPaths root
   configResult <- loadSiteConfig (projectConfig paths)
   bundlesResult <- discoverBundles paths
@@ -130,33 +158,112 @@ prepareBuildPlan root includeDrafts = do
       if not (null $ configPathProblems <> bundleProblems)
         then pure $ Left (configPathProblems <> bundleProblems)
         else do
-          let dependencies =
+          bibliographyResult <- listFilesIfPresent (projectLatex paths </> "bibliography")
+          let bibliographyFiles = either (const []) id bibliographyResult
+              baseDependencies =
                 Map.fromList
-                  [ (bundleDirectory bundle, pathsForBundle)
+                  [ (bundleDirectory bundle, pathsForBundle <> bibliographyFiles)
                   | Right (bundle, pathsForBundle) <- bundleChecks
                   ]
-              selected = filter (isVisible includeDrafts . metadataVisibility . bundleMetadata) allBundles
+              visible = filter (isVisible includeDrafts . metadataVisibility . bundleMetadata) allBundles
+              siteIndex = buildSiteIndex allBundles
+          pluginResult <- preparePluginPlan paths siteIndex visible
           assetResult <- expectedAssetOutputs paths
-          mediaResults <- traverse expectedMediaOutputs selected
+          mediaResults <- traverse expectedMediaOutputs visible
           let resourceProblems =
                 either id (const []) assetResult
+                  <> either id (const []) bibliographyResult
                   <> concat [problems | Left problems <- mediaResults]
+                  <> either id (const []) pluginResult
           if not (null resourceProblems)
             then pure (Left resourceProblems)
-            else do
-              let assetOutputs = either (const []) id assetResult
-                  mediaOutputs = concat [outputs | Right outputs <- mediaResults]
-                  pageOutputs = map (normalise . slotOutputPath . bundleSlot) selected
-              pure . Right $
-                BuildPlan
-                  { planPaths = paths
-                  , planConfig = config
-                  , planSiteIndex = buildSiteIndex allBundles
-                  , planAllBundles = allBundles
-                  , planBundles = selected
-                  , planBundleDependencies = dependencies
-                  , planExpectedOutputs = Set.fromList (pageOutputs <> assetOutputs <> mediaOutputs)
-                  }
+            else
+              case pluginResult of
+                Left problems -> pure (Left problems)
+                Right pluginPlan -> do
+                  case selectBuildBundles selectors pluginPlan visible of
+                    Left problems -> pure (Left problems)
+                    Right selected -> do
+                      let dependencies =
+                            Map.mapWithKey
+                              (\directory files ->
+                                  case [bundle | bundle <- visible, bundleDirectory bundle == directory] of
+                                    bundle : _ -> files <> pluginDependencyFiles pluginPlan (bundleSlot bundle)
+                                    [] -> files
+                              )
+                              baseDependencies
+                          assetOutputs = either (const []) id assetResult
+                          mediaOutputs = concat [outputs | Right outputs <- mediaResults]
+                          pageOutputs = map (normalise . slotOutputPath . bundleSlot) visible
+                      pure . Right $
+                        BuildPlan
+                          { planPaths = paths
+                          , planConfig = config
+                          , planSiteIndex = siteIndex
+                          , planPluginPlan = pluginPlan
+                          , planAllBundles = allBundles
+                          , planVisibleBundles = visible
+                          , planBundles = selected
+                          , planBundleDependencies = dependencies
+                          , planExpectedOutputs = Set.fromList (pageOutputs <> assetOutputs <> mediaOutputs)
+                          , planSelective = length selected < length visible
+                          , planForce = force
+                          }
+
+selectBuildBundles
+  :: [BuildSelector]
+  -> PluginPlan
+  -> [Bundle]
+  -> Either [Diagnostic] [Bundle]
+selectBuildBundles rawSelectors pluginPlan visible = do
+  let selectors = if null rawSelectors then [SelectAll] else rawSelectors
+      hasAll = SelectAll `elem` selectors
+  when (hasAll && length selectors > 1) $
+    Left [diagnostic Error "build.selector-all-mixed" "--which all cannot be combined with other selectors"]
+  seedSlots <-
+    if hasAll
+      then Right (Set.fromList $ map bundleSlot visible)
+      else Set.unions <$> traverse matchingSlots selectors
+  when (Set.null seedSlots) $
+    Left [diagnostic Error "build.selector-empty" "--which matched no visible physical bundle"]
+  let closed = dependencyClosure pluginPlan seedSlots
+  pure [bundle | bundle <- visible, Set.member (bundleSlot bundle) closed]
+ where
+  matchingSlots SelectAll = Right Set.empty
+  matchingSlots (SelectSlot slot) =
+    Right . Set.fromList $
+      [bundleSlot bundle | bundle <- visible, bundleSlot bundle == slot]
+  matchingSlots (SelectRegex patternText) =
+    case Regex.compile defaultCompOpt defaultExecOpt (Text.unpack patternText) of
+      Left message ->
+        Left [diagnostic Error "build.selector-regex-invalid" (Text.pack message)]
+      Right (regex :: Regex) ->
+        Right . Set.fromList $
+          [ bundleSlot bundle
+          | bundle <- visible
+          , matchTest regex (Text.unpack $ renderSlot $ bundleSlot bundle)
+          ]
+
+dependencyClosure :: PluginPlan -> Set.Set Slot -> Set.Set Slot
+dependencyClosure pluginPlan = go
+ where
+  allPlugins = concat (Map.elems $ pluginsByOwner pluginPlan)
+  go current =
+    let ownerInputs =
+          Set.fromList
+            [ selected
+            | plugin <- allPlugins
+            , Set.member (pluginOwner plugin) current
+            , selected <- pluginSelectedSlots plugin
+            ]
+        affectedOwners =
+          Set.fromList
+            [ pluginOwner plugin
+            | plugin <- allPlugins
+            , any (`Set.member` current) (pluginSelectedSlots plugin)
+            ]
+        next = current <> ownerInputs <> affectedOwners
+     in if next == current then current else go next
 
 validateBundle :: SiteConfig -> Bundle -> IO (Either [Diagnostic] (Bundle, [FilePath]))
 validateBundle config bundle = do
@@ -165,8 +272,6 @@ validateBundle config bundle = do
       localFilterRoot = bundleDirectory bundle </> "extension"
   includeResult <- expandBundleSource (bundleDirectory bundle) (bundleIndexPath bundle)
   localFilters <- traverse (resolveExistingUnder localFilterRoot) (metadataFilters metadata)
-  generator <- traverse (resolveExistingUnder localFilterRoot) (metadataGenerator metadata)
-  postAnalyzer <- traverse (resolveExistingUnder localFilterRoot . analyzerScript) (metadataPostAnalyzer metadata)
   let templateProblems =
         [ diagnosticAt
             Error
@@ -176,21 +281,25 @@ validateBundle config bundle = do
         | not (Map.member templateAlias $ configTemplates config)
         ]
       filterProblems = [problem | Left problem <- localFilters]
-      generatorProblems = maybe [] (either (: []) (const [])) generator
-      analyzerProblems = maybe [] (either (: []) (const [])) postAnalyzer
       includeProblems = either id (const []) includeResult
-      problems = templateProblems <> filterProblems <> generatorProblems <> analyzerProblems <> includeProblems
+      problems = templateProblems <> filterProblems <> includeProblems
       includes = filter (/= bundleIndexPath bundle) $ either (const []) expandedDependencies includeResult
       resolvedLocalFilters = [path | Right path <- localFilters]
-      resolvedGenerator = maybe [] (either (const []) (: [])) generator
-      resolvedAnalyzer = maybe [] (either (const []) (: [])) postAnalyzer
   pure $
     if null problems
-      then Right (bundle, includes <> resolvedLocalFilters <> resolvedGenerator <> resolvedAnalyzer)
+      then Right (bundle, includes <> resolvedLocalFilters)
       else Left problems
 
 buildHtml :: FilePath -> Bool -> IO (Either [Diagnostic] Bool)
-buildHtml root includeDrafts = do
+buildHtml root includeDrafts = buildHtmlWith root includeDrafts [SelectAll] False
+
+buildHtmlWith
+  :: FilePath
+  -> Bool
+  -> [BuildSelector]
+  -> Bool
+  -> IO (Either [Diagnostic] Bool)
+buildHtmlWith root includeDrafts selectors force = do
   let paths = mkProjectPaths root
       lockDirectory = projectState paths </> "build.lock"
   createDirectoryIfMissing True (projectState paths)
@@ -202,38 +311,94 @@ buildHtml root includeDrafts = do
             { diagnosticHint = Just "If no build is running, remove the stale .tex2ss/build.lock directory."
             }
         ]
-    Right () -> buildHtmlUnlocked root includeDrafts `finally` removeDirectory lockDirectory
+    Right () -> buildHtmlUnlocked root includeDrafts selectors force `finally` removeDirectory lockDirectory
 
-buildHtmlUnlocked :: FilePath -> Bool -> IO (Either [Diagnostic] Bool)
-buildHtmlUnlocked root includeDrafts = do
-  planResult <- prepareBuildPlan root includeDrafts
+buildHtmlUnlocked :: FilePath -> Bool -> [BuildSelector] -> Bool -> IO (Either [Diagnostic] Bool)
+buildHtmlUnlocked root includeDrafts selectors force = do
+  planResult <- prepareBuildPlanWith root includeDrafts selectors force
   case planResult of
     Left problems -> pure (Left problems)
     Right plan -> do
       let paths = planPaths plan
-          configuration = hakyllConfiguration paths
-      createDirectoryIfMissing True (htmlWorkDirectory paths)
-      logger <- Logger.new Logger.Message
-      (exitCode, _) <- run RunModeNormal configuration logger (siteRules plan)
-      case exitCode of
-        ExitFailure _ ->
-          pure . Left $
-            [ diagnostic Error "build.hakyll-failed" "Hakyll failed; the previous public snapshot was preserved"
-            ]
-        ExitSuccess -> do
-          pruneCandidate plan
-          commitHtmlSnapshot paths
+          configuration = hakyllConfiguration paths force
+      seeded <- seedSelectiveCandidate plan
+      case seeded of
+        Left problems -> pure (Left problems)
+        Right () -> do
+          when force $ resetHakyllForceStore paths
+          createDirectoryIfMissing True (htmlWorkDirectory paths)
+          logger <- Logger.new Logger.Message
+          (exitCode, _) <- run RunModeNormal configuration logger (siteRules plan)
+          case exitCode of
+            ExitFailure _ ->
+              pure . Left $
+                [ diagnostic Error "build.hakyll-failed" "Hakyll failed; the previous public snapshot was preserved"
+                ]
+            ExitSuccess -> do
+              pruneCandidate plan
+              commitHtmlSnapshot paths
 
-hakyllConfiguration :: ProjectPaths -> Configuration
-hakyllConfiguration paths =
+hakyllConfiguration :: ProjectPaths -> Bool -> Configuration
+hakyllConfiguration paths force =
   defaultConfiguration
     { providerDirectory = projectRoot paths
     , destinationDirectory = htmlWorkDirectory paths
-    , storeDirectory = projectState paths </> "store"
+    , storeDirectory = projectState paths </> runtimeStoreName force
     , tmpDirectory = projectState paths </> "tmp"
     , inMemoryCache = True
     , ignoreFile = ignoreProjectFile paths
     }
+
+runtimeStoreName :: Bool -> FilePath
+runtimeStoreName force =
+  "store-tex2ss-"
+    <> showVersion Paths_tex2ss.version
+    <> "-pandoc-"
+    <> showVersion pandocVersion
+    <> if force then "-force" else ""
+
+seedSelectiveCandidate :: BuildPlan -> IO (Either [Diagnostic] ())
+seedSelectiveCandidate plan
+  | not (planSelective plan) = pure (Right ())
+  | otherwise = do
+      let paths = planPaths plan
+      published <- doesDirectoryExist (projectPublic paths)
+      if not published
+        then
+          pure . Left $
+            [ diagnosticAt
+                Error
+                "build.selective-needs-baseline"
+                (projectPublic paths)
+                "selective build requires an existing successful public snapshot; run --which all first"
+            ]
+        else do
+          result <- try @IOException $ do
+            candidateExists <- doesDirectoryExist (htmlWorkDirectory paths)
+            when candidateExists $ removePathForcibly (htmlWorkDirectory paths)
+            copyDirectoryTree (projectPublic paths) (htmlWorkDirectory paths)
+          pure $
+            case result of
+              Left exception -> Left [diagnosticAt Error "build.seed-failed" (projectPublic paths) (Text.pack $ show exception)]
+              Right () -> Right ()
+
+resetHakyllForceStore :: ProjectPaths -> IO ()
+resetHakyllForceStore paths = do
+  let target = projectState paths </> runtimeStoreName True
+  exists <- doesDirectoryExist target
+  when exists $ removePathForcibly target
+
+copyDirectoryTree :: FilePath -> FilePath -> IO ()
+copyDirectoryTree source destination = do
+  createDirectoryIfMissing True destination
+  names <- listDirectory source
+  forM_ names $ \name -> do
+    let sourcePath = source </> name
+        destinationPath = destination </> name
+    directory <- doesDirectoryExist sourcePath
+    if directory
+      then copyDirectoryTree sourcePath destinationPath
+      else copyFile sourcePath destinationPath
 
 ignoreProjectFile :: ProjectPaths -> FilePath -> Bool
 ignoreProjectFile paths path =
@@ -284,9 +449,17 @@ siteRules plan = do
     makePatternDependency
       KindContent
       metaPattern
+  bibliographyDependency <-
+    makePatternDependency
+      KindContent
+      (fromGlob "latex/bibliography/**")
 
-  forM_ bundles $ \bundle ->
-    rulesExtraDependencies [siteIndexDependency] $
+  forM_ bundles $ \bundle -> do
+    pluginSetDependencies <-
+      traverse
+        (makePatternDependency KindContent . fromGlob . (<> "/**") . slashPath . projectRelative paths)
+        (pluginDependencyDirectories (planPluginPlan plan) $ bundleSlot bundle)
+    rulesExtraDependencies (siteIndexDependency : bibliographyDependency : pluginSetDependencies) $
       match (fromList [projectIdentifier paths $ bundleIndexPath bundle]) $ do
         route $ customRoute (const $ slotOutputPath $ bundleSlot bundle)
         compile $ pageCompiler plan bundle
@@ -305,33 +478,35 @@ pageCompiler plan bundle = do
           <> allMeta
           <> Map.findWithDefault [] (bundleDirectory bundle) (planBundleDependencies plan)
           <> [projectPandoc paths </> path | path <- configFilters config]
-      analyzerBundles =
-        matchingAnalyzerBundles
-          bundle
-          (metadataAnalysisInputs $ bundleMetadata bundle)
-          (planBundles plan)
+      bundleBySlot = Map.fromList [(bundleSlot candidate, candidate) | candidate <- planBundles plan]
+      analysisBundles =
+        [ candidate
+        | slot <- ownerAnalysisSlots (planPluginPlan plan) (bundleSlot bundle)
+        , Just candidate <- [Map.lookup slot bundleBySlot]
+        ]
   void getResourceBody
   forM_ (nub directDependencies) $ \path ->
     void (loadBody $ projectIdentifier paths path :: Compiler String)
-  encodedExports <-
-    forM analyzerBundles $ \candidate ->
+  encodedAnalyses <-
+    forM analysisBundles $ \candidate ->
       loadSnapshotBody
         (projectIdentifier paths $ bundleIndexPath candidate)
         analysisSnapshotName
-  descendantExports <- traverse decodeAnalysisSnapshot encodedExports
+  descendantAnalyses <- concat <$> traverse decodeAnalysisSnapshot encodedAnalyses
   rendered <-
     unsafeCompiler $
       renderBundleHtmlWith
         paths
         config
         (planSiteIndex plan)
-        (catMaybes descendantExports)
+        (planPluginPlan plan)
+        descendantAnalyses
         bundle
   compiled <-
     case rendered of
       Left problems -> fail (Text.unpack $ renderDiagnostics problems)
       Right value -> pure value
-  analysisItem <- makeItem (LazyChar8.unpack $ encode $ renderedAnalysis compiled)
+  analysisItem <- makeItem (LazyChar8.unpack $ encode $ renderedAnalyses compiled)
   void $ saveSnapshot analysisSnapshotName analysisItem
   let templateAlias = fromMaybe (configDefaultTemplate config) (metadataTemplate $ bundleMetadata bundle)
       selectedTemplate = configTemplates config Map.! templateAlias
@@ -339,7 +514,7 @@ pageCompiler plan bundle = do
   makeItem (Text.unpack $ renderedHtml compiled)
     >>= loadAndApplyTemplate templateIdentifier (pageContext config bundle $ renderedToc compiled)
 
-decodeAnalysisSnapshot :: String -> Compiler (Maybe AnalysisExport)
+decodeAnalysisSnapshot :: String -> Compiler [PluginAnalysis]
 decodeAnalysisSnapshot encoded =
   case eitherDecode (LazyChar8.pack encoded) of
     Left problem -> fail ("invalid tex2ss analysis snapshot: " <> problem)

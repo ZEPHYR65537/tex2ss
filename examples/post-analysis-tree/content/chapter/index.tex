@@ -1,4 +1,5 @@
 \documentclass{article}
+\usepackage{tex2ss}
 \title{Child}
 \begin{document}
 \maketitle
@@ -7,5 +8,21 @@
 
 This is the child bundle.
 
-\end{document}
+\texssaudio{https://example.test/audio.mp3}{Example audio}
 
+\texssvideo{https://example.test/video.mp4}{Example video}
+
+See \texsslink{/chapter/topic/}{the grandchild}.
+
+Inline math remains native: $e^{i\pi}+1=0$.
+
+\begin{equation}\label{eq:energy}
+E = mc^2
+\end{equation}
+
+See Equation \eqref{eq:energy} and the citation \cite{doe2026}.
+
+\bibliographystyle{plain}
+\bibliography{bibliography/references.bib}
+
+\end{document}

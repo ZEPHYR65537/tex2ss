@@ -10,9 +10,12 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase)
+import Tex2ss.Build (buildHtml)
 import Tex2ss.Diagnostics (Diagnostic (..))
 import Tex2ss.Pandoc (RenderedBundle (renderedToc), renderBundleHtml, renderBundleHtmlWith)
 import Tex2ss.Paths (mkProjectPaths)
+import Tex2ss.Plugin (preparePluginPlan)
+import Tex2ss.Scaffold (initializeProject)
 import Tex2ss.SiteIndex (buildSiteIndex)
 import Tex2ss.Types
   ( Bundle (..)
@@ -49,10 +52,9 @@ tests =
     , testCase "splices generated Pandoc blocks before filters run" $
         withSystemTempDirectory "tex2ss-pandoc" $ \root -> do
           (config, originalBundle, filterPath) <- fixture root
-          let extensionDirectory = bundleDirectory originalBundle </> "extension"
-              generatorPath = extensionDirectory </> "semantic.lua"
-              metadata = (bundleMetadata originalBundle) {metadataGenerator = Just "semantic.lua"}
-              bundle = originalBundle {bundleMetadata = metadata}
+          let extensionDirectory = bundleDirectory originalBundle </> "extension" </> "semantic"
+              generatorPath = extensionDirectory </> "init.lua"
+              bundle = originalBundle
           createDirectoryIfMissing True extensionDirectory
           TextIO.writeFile (bundleIndexPath bundle) generatedSourceDocument
           TextIO.writeFile generatorPath semanticGenerator
@@ -77,19 +79,41 @@ tests =
               assertBool
                 "expanded macro did not become semantic HTML"
                 ("<strong>Expanded macro</strong>" `Text.isInfixOf` html)
+    , testCase "preserves native math, citations, figures and references" $
+        withSystemTempDirectory "tex2ss-pandoc-native-semantics" $ \root -> do
+          initialized <- initializeProject root "Native semantics"
+          assertBool "scaffold failed" (either (const False) (const True) initialized)
+          TextIO.writeFile (root </> "latex" </> "bibliography" </> "references.bib") nativeBibliography
+          TextIO.writeFile (root </> "content" </> "index.tex") nativeSemanticDocument
+          buildHtml root False >>= either (const $ assertBool "expected native Pandoc semantics" False) (const $ pure ())
+          html <- TextIO.readFile (root </> "public" </> "index.html")
+          let rendered = Text.unpack html
+          assertBool ("inline math missing: " <> rendered) ("math inline" `Text.isInfixOf` html)
+          assertBool ("display math missing: " <> rendered) ("math display" `Text.isInfixOf` html)
+          assertBool ("citation AST missing: " <> rendered) ("data-cites=\"doe2026\"" `Text.isInfixOf` html)
+          assertBool ("processed bibliography missing: " <> rendered) ("Doe" `Text.isInfixOf` html && "id=\"refs\"" `Text.isInfixOf` html)
+          assertBool ("figure missing: " <> rendered) ("<figure" `Text.isInfixOf` html)
+          assertBool ("figure reference missing: " <> rendered) ("href=\"#fig:demo\"" `Text.isInfixOf` html)
+          assertBool ("equation reference missing: " <> rendered) ("href=\"#eq:demo\"" `Text.isInfixOf` html)
     , testCase "derives the template TOC from the filtered document" $
         withSystemTempDirectory "tex2ss-pandoc-toc" $ \root -> do
           (config, bundle, filterPath) <- fixture root
           TextIO.writeFile (bundleIndexPath bundle) sectionDocument
           TextIO.writeFile filterPath headingFilter
-          result <- renderBundleHtmlWith (mkProjectPaths root) config (buildSiteIndex [bundle]) [] bundle
-          case result of
-            Left _ -> assertBool "expected TOC derivation" False
-            Right rendered -> do
-              assertBool
-                ("filtered heading missing from TOC: " <> Text.unpack (renderedToc rendered))
-                ("Filtered heading" `Text.isInfixOf` renderedToc rendered)
-              assertBool "TOC did not link to the generated heading id" ("#filtered-heading" `Text.isInfixOf` renderedToc rendered)
+          let paths = mkProjectPaths root
+              siteIndex = buildSiteIndex [bundle]
+          pluginPlan <- preparePluginPlan paths siteIndex [bundle]
+          case pluginPlan of
+            Left _ -> assertBool "expected empty plugin plan" False
+            Right plan -> do
+              result <- renderBundleHtmlWith paths config siteIndex plan [] bundle
+              case result of
+                Left _ -> assertBool "expected TOC derivation" False
+                Right rendered -> do
+                  assertBool
+                    ("filtered heading missing from TOC: " <> Text.unpack (renderedToc rendered))
+                    ("Filtered heading" `Text.isInfixOf` renderedToc rendered)
+                  assertBool "TOC did not link to the generated heading id" ("#filtered-heading" `Text.isInfixOf` renderedToc rendered)
     ]
 
 fixture :: FilePath -> IO (SiteConfig, Bundle, FilePath)
@@ -111,7 +135,8 @@ fixture root = do
           "default"
           ["filters/test.lua"]
           PdfLaTeX
-      metadata = BundleMetadata 1 "Page" Nothing Nothing Nothing Published Nothing [] Map.empty Nothing Nothing []
+          Map.empty
+      metadata = BundleMetadata 1 "Page" Nothing Nothing Nothing Published [] Map.empty Nothing
       bundle = Bundle (Slot []) bundleDirectory indexPath metaPath metadata
   pure (config, bundle, filterPath)
 
@@ -137,25 +162,25 @@ generatedSourceDocument =
   Text.unlines
     [ "\\documentclass{article}"
     , "\\begin{document}"
-    , "\\tex2ssgenerated{first}"
-    , "\\tex2ssgenerated{semantic}"
-    , "\\tex2ssgenerated{second}"
+    , "\\texssgenerated{semantic}{first}"
+    , "\\texssgenerated{semantic}{semantic}"
+    , "\\texssgenerated{semantic}{second}"
     , "\\end{document}"
     ]
 
 semanticGenerator :: Text.Text
 semanticGenerator =
   Text.unlines
-    [ "function pre_generator(context)"
-    , "  return { fragments = {"
-    , "    first = { type = 'deferred_latex', value = 'First deferred paragraph.' },"
-    , "    semantic = {"
-    , "      type = 'pandoc_blocks',"
-    , "      blocks = pandoc.Blocks({ pandoc.Para({ pandoc.Str('Generated semantic block') }) })"
-    , "    },"
-    , "    second = { type = 'deferred_latex', value = 'Second deferred paragraph.' }"
-    , "  } }"
-    , "end"
+    [ "local tex2ss = require 'tex2ss'"
+    , "return {"
+    , "  generate = function(context)"
+    , "    return {"
+    , "      first = tex2ss.latex('First deferred paragraph.'),"
+    , "      semantic = tex2ss.blocks(pandoc.Blocks({ pandoc.Para({ pandoc.Str('Generated semantic block') }) })),"
+    , "      second = tex2ss.latex('Second deferred paragraph.')"
+    , "    }"
+    , "  end"
+    , "}"
     ]
 
 generatedBlockFilter :: Text.Text
@@ -196,4 +221,34 @@ headingFilter =
     , "  element.identifier = 'filtered-heading'"
     , "  return element"
     , "end"
+    ]
+
+nativeSemanticDocument :: Text.Text
+nativeSemanticDocument =
+  Text.unlines
+    [ "\\documentclass{article}"
+    , "\\begin{document}"
+    , "Inline math $x^2 + y^2 = z^2$."
+    , "\\[a^2 + b^2 = c^2\\]"
+    , "\\begin{equation}\\label{eq:demo}E = mc^2\\end{equation}"
+    , "See Equation \\ref{eq:demo}; cite \\cite{doe2026}."
+    , "\\begin{figure}"
+    , "\\centering"
+    , "\\includegraphics{media/figure.png}"
+    , "\\caption{A figure}\\label{fig:demo}"
+    , "\\end{figure}"
+    , "See Figure \\ref{fig:demo}."
+    , "\\bibliography{bibliography/references.bib}"
+    , "\\end{document}"
+    ]
+
+nativeBibliography :: Text.Text
+nativeBibliography =
+  Text.unlines
+    [ "@article{doe2026,"
+    , "  author = {Doe, Jane},"
+    , "  title = {Semantic Sites},"
+    , "  journal = {Example Journal},"
+    , "  year = {2026}"
+    , "}"
     ]

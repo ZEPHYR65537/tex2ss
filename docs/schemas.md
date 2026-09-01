@@ -1,8 +1,8 @@
-# Schema v1
+# Schema v1 and public extension contracts
 
-Both JSON documents are strict: unknown top-level or site fields fail. Custom
-bundle values belong under `data` so future reserved fields can be added without
-collisions.
+Both JSON files are strict: unknown fields fail. Bundle-specific static values
+belong under `data`, leaving room for future reserved fields without rescanning
+the document body.
 
 ## `config.json`
 
@@ -17,25 +17,50 @@ collisions.
     "author": "",
     "email": "author@example.test"
   },
-  "templates": {
-    "default": "default.html"
-  },
+  "templates": { "default": "default.html" },
   "default_template": "default",
-  "filters": ["filters/references.lua"],
-  "pdf_engine": "pdflatex"
+  "filters": ["filters/tex2ss-semantic.lua"],
+  "pdf_engine": "pdflatex",
+  "deploy": {
+    "production": {
+      "script": "deploy/production.lua",
+      "data": { "project": "example" }
+    }
+  }
 }
 ```
 
-Template paths are relative to `site/templates/` and must end in `.html`.
-Global filter paths are relative to `pandoc/` and must end in `.lua`. Every
-path must exist and remain inside its owning root after canonicalization.
+Template paths are relative to `site/templates/`. Global filter paths are
+relative to `pandoc/`; all filters are `.lua` files and run in declared order.
+Every path must exist and remain inside its owning root after canonicalization.
 
-`pdf_engine` is optional and defaults to `pdflatex`. Its only other accepted
-values are `xelatex` and `lualatex`. It selects one fixed, structured `latexmk`
-recipe (`-pdf`, `-xelatex`, or `-lualatex` respectively); it does not accept a
-path, argv, shell command, recipe name, or bundle override. Explicit `null` and
-unknown values fail the strict schema. The recipe uses `-norc`, so system, user,
-and project `.latexmkrc` files cannot silently change the fixed command model.
+`pdf_engine` defaults to `pdflatex`; `xelatex` and `lualatex` are also accepted.
+It selects a fixed `latexmk -norc` recipe, not a path or command line.
+
+Deploy target names use portable identifiers. `script` is relative to the
+project root and must remain under `deploy/`; `data` is an open JSON object.
+Deploy Lua is trusted project code, but it returns structured commands rather
+than shell text. Build and serve never trigger a target.
+
+```lua
+return function(ctx)
+  local project = assert(ctx.target.data.project)
+  return {
+    commands = {
+      {
+        executable = "wrangler",
+        arguments = {"pages", "deploy", ".", "--project-name", project},
+        cwd = "public"
+      }
+    }
+  }
+end
+```
+
+The context contains the canonical `public` path, decoded successful build
+`manifest`, and `{name, data}` target. Each command must use exactly
+`executable`, `arguments`, and `cwd = "public"`; no shell string is accepted.
+Dry-run loads this function and prints the plan without executing it.
 
 ## `meta.json`
 
@@ -47,13 +72,6 @@ and project `.latexmkrc` files cannot silently change the fixed command model.
   "date": "2026-08-31",
   "template": "default",
   "visibility": "published",
-  "generator": "tree.lua",
-  "analysis_inputs": ["example.outline"],
-  "post_analyzer": {
-    "script": "outline.lua",
-    "namespace": "example.outline",
-    "schema_version": 1
-  },
   "pdf_name": "post-handout",
   "filters": ["filters/local.lua"],
   "data": {
@@ -63,87 +81,118 @@ and project `.latexmkrc` files cannot silently change the fixed command model.
 }
 ```
 
-`title` is required. `date`, when present, is `YYYY-MM-DD`; visibility is
-`published` or `draft`. Local filter paths are relative to the bundle's
-`extension/` directory. The optional experimental `generator` is one `.lua`
-file relative to the same directory. Template fields receive custom values as
-`$data_<key>$`; arrays and objects are compact JSON.
+`title` is required. Dates use `YYYY-MM-DD`; visibility is `published` or
+`draft`. Local filters are relative to the bundle's `extension/` directory.
+The superseded `generator`, `analysis_inputs`, and `post_analyzer` fields are
+rejected rather than silently accepted.
 
-HTML templates receive `$body$`, `$title$`, `$author$`, `$date$`,
+`pdf_name` must match `[a-z0-9][a-z0-9_-]*` and does not contain `.pdf`. With no
+override the root produces `pdfs/index.pdf`; `content/guide/reference` produces
+`pdfs/guide/reference/reference.pdf`.
+
+HTML templates receive `$body$`, `$toc$`, `$title$`, `$author$`, `$date$`,
 `$visibility$`, `$slot$`, `$route$`, `$site_title$`, `$site_description$`,
-`$base_url$`, `$lang$`, and `$toc$`. `$toc$` is an HTML list fragment derived
-from the final filtered Pandoc AST and is empty when the document has no
-headings. It is template presentation data, not a `meta.json` field and not a
-second document parse.
+`$base_url$`, `$lang$`, plus `$data_<key>$`. Arrays and objects are compact
+JSON. `$toc$` is derived from the final filtered AST without a second parse.
 
-`post_analyzer` is an optional experimental contract. Its `.lua` script is
-relative to the same `extension/` directory. `namespace` must contain at least
-two portable dotted segments, and `schema_version` must be positive. The script
-defines `post_analyzer(document, context)` and returns one JSON-serializable
-open value. `document` is the current bundle's Pandoc AST after the ordered
-filters; tex2ss supplies the document identity, namespace, version, and producer
-identity around the returned value. One encoded export may not exceed 1 MiB.
+## Content plugins
 
-`analysis_inputs` is a duplicate-free list of namespaces read by the current
-bundle's generator. It requires `generator`. The generator receives matching
-values as `context.analysis_exports`, ordered by document/namespace. Only
-exports from strict descendants of the current slot are included: never the
-current bundle, siblings, or ancestors. Declaring a namespace is the v1
-dependency contract; Lua remains free to interpret and aggregate each open
-value. HTML stores successful exports as Hakyll snapshots, and PDF schedules
-bundles from deepest slot to root. Both targets use the same `html5` filter
-environment for this canonical analysis AST, so `FORMAT`-sensitive filters do
-not produce divergent ancestor inputs.
+`index.tex` declares a block-level fragment on a standalone line:
 
-`pdf_name` is an optional PDF basename without `.pdf`. It must match
-`[a-z0-9][a-z0-9_-]*`; paths, extensions, uppercase letters, and traversal are
-rejected. Without it, a non-root bundle uses the final slot segment, while the
-root bundle uses `index`. The slot directory is never changed by this field:
-`content/guide/reference` produces `pdfs/guide/reference/reference.pdf`, or
-`pdfs/guide/reference/post-handout.pdf` with the example override.
+```latex
+\texssgenerated{archive}{latest} % an optional trailing comment is valid
+```
 
-The experimental generator must define `pre_generator(context)` and return a
-strict `fragments` table. Each named block fragment currently has one of these
-explicit shapes:
+Plugin and fragment IDs match `[a-z0-9][a-z0-9_-]*`. The first occurrence fixes
+plugin execution order. Each plugin runs once per owner view, may return several
+named fragments, and the same fragment may be inserted repeatedly. Referencing
+a missing fragment fails the build.
+
+The public name is `\texssgenerated`, not `\tex2ssgenerated`: digits terminate
+a normal TeX control word. `latex/tex2ss.sty` provides
+`\providecommand{\texssgenerated}[2]{}` so raw LaTeX remains compilable and
+simply omits dynamic content outside tex2ss.
+
+Resolution order is:
+
+```text
+content/<slot>/extension/<plugin-id>/init.lua
+plugins/<plugin-id>/init.lua
+```
+
+The selected plugin directory is tracked as a manifest. Standard Lua `require`
+loads sibling modules; there is no package manager, plugin manifest, dependency
+download, or version resolver.
+
+An entry returns a hook table:
 
 ```lua
+local tex2ss = require "tex2ss"
+
 return {
-  fragments = {
-    legacy = { type = "deferred_latex", value = "\\begin{quote}...\\end{quote}" },
-    semantic = {
-      type = "pandoc_blocks",
-      blocks = pandoc.Blocks({ pandoc.Para({ pandoc.Str("Hello") }) })
+  select = function(ctx)
+    return { "posts/one", "posts/two" }
+  end,
+
+  analyze = function(document, ctx)
+    return { title = pandoc.utils.stringify(document.meta.title) }
+  end,
+
+  generate = function(ctx)
+    return {
+      latest = tex2ss.latex("\\begin{itemize}...\\end{itemize}"),
+      tree = tex2ss.blocks(pandoc.Blocks({ pandoc.Para("Tree") }))
     }
-  }
+  end
 }
 ```
 
-Placeholders use a standalone `\\tex2ssgenerated{name}` line. Direct Pandoc
-blocks may not contain raw target nodes. These Lua field names remain an
-experimental protocol rather than a stable schema-v1 compatibility promise.
+`generate` is required. `analyze` is optional; without it the plugin uses only
+the owner and complete frozen SiteIndex. `select` is meaningful only with
+`analyze`; its default is every visible strict descendant. Selecting the owner,
+a sibling, an ancestor, a missing/draft-hidden slot, or a duplicate fails.
 
-M2.2 deliberately adds only the root `pdf_engine` enum, not a generic recipe
-schema. Multiple recipes, arbitrary tool paths, and user-provided command lines
-remain outside schema v1.
+`analyze` receives one descendant's AST after the complete ordered-filter chain
+and returns `nil` or a JSON-serializable open value of at most 1 MiB. `generate`
+receives the owner, complete SiteIndex, and only this plugin's results in stable
+slot order. Results are private to the owning view; there is no namespace bus or
+plugin dependency graph.
 
-## Physical bundles and routes
+`tex2ss.latex` is the ordinary form and rejoins the owner's unified reader/PDF
+source pipeline. `tex2ss.blocks` directly inserts portable Pandoc blocks; raw
+target nodes are rejected and PDF lowers the blocks using the linked Pandoc
+version. Plugins cannot return target-specific HTML/PDF values or create routes.
+
+## First-party semantic LaTeX
+
+The scaffold includes these legal control words:
+
+```latex
+\texssaudio{media/audio/example.mp3}{Audio recording}
+\texssvideo{media/video/example.mp4}{Video recording}
+\texsslink{/posts/one/}{Read the post}
+```
+
+The package produces readable links in PDF. The ordinary first-party Pandoc
+filter turns audio/video into semantic containers with `tex2ss-media` and
+`tex2ss-audio`/`tex2ss-video` classes and preserves a fallback link. Default JS
+enhances them into players; templates, CSS, and user JS own presentation.
+Math does not use a template predicate such as `$has_math$`. The first-party
+filter supplies the small HTML bridge Pandoc's LaTeX reader needs for
+`\label`/`\ref`/`\eqref`, labeled display-equation numbers, figure references,
+and citation fallback content. The AST remains native Pandoc Math/Figure/Cite.
+When LaTeX declares `\bibliography{bibliography/references.bib}`, tex2ss runs
+Pandoc's linked citeproc after ordered filters; bibliography paths resolve from
+the bundle or project `latex/` directory. Real TeX continues to process the
+same native LaTeX commands for PDF.
+
+## Physical bundles and includes
 
 A directory is a bundle only when it has both `index.tex` and `meta.json`.
-Having only one marker is an error. Once a bundle is found, its `sources/`,
-`media/`, and `extension/` trees are not searched for nested bundles.
+Having one marker is an error. Its `sources/`, `media/`, and `extension/` trees
+are not searched for nested bundles. Slot segments use the same portable ID
+rule; `.` is the root selector, not a directory name.
 
-Slot segments match `[a-z0-9][a-z0-9_-]*`. The root bundle routes to `/`; a
-bundle at `content/posts/hello/` routes to `/posts/hello/`. Bundle media is
-copied to the route-relative `media/` subtree, while site assets are copied to
-`/assets/`. Consequently `\includegraphics{media/img/figure.png}` uses the same
-bundle-relative source convention for HTML and PDF; filters remain responsible
-for any nonstandard media macro semantics.
-
-Literal `\input{...}` and `\include{...}` commands are expanded only when the
-resolved file remains under the current bundle's `sources/` directory.
-Absolute, parent-traversing, missing, dynamic, and cyclic includes fail.
-
-The exact layout command `\maketitle` is consumed after Lua filters because the
-site template owns title presentation and `meta.json.title` is authoritative.
-Other contentful RawTeX must be handled by a configured filter or the page
-fails explicitly.
+Literal `\input{...}` and `\include{...}` commands may resolve only inside the
+current bundle's `sources/`. Absolute, parent-traversing, missing, dynamic, and
+cyclic includes fail. Contentful RawTeX left after filters also fails explicitly.
