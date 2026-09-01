@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
@@ -16,6 +20,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      - name: Check release boundary
+        shell: pwsh
+        run: ./scripts/check-release.ps1
       - uses: haskell-actions/setup@v2
         with:
           ghc-version: 9.10.3
@@ -23,9 +30,6 @@ jobs:
       - run: cabal update
       - run: cabal build all
       - run: cabal test all
-      - name: Check release boundary
-        shell: pwsh
-        run: ./scripts/check-release.ps1
 
   pdf-smoke:
     strategy:
