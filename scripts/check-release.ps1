@@ -1,6 +1,10 @@
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 
 $tracked = @(git ls-files)
+if ($LASTEXITCODE -ne 0) {
+  throw "Could not enumerate tracked files"
+}
 $forbidden = @($tracked | Where-Object {
   $_ -match '(^|/)(GOAL|AGENTS)\.md$' -or $_ -match '(^|/)model-context/'
 })
