@@ -46,11 +46,26 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install miktex --yes --no-progress
+          $PSNativeCommandUseErrorActionPreference = $false
+          function Invoke-NativeWithRetry {
+            param(
+              [Parameter(Mandatory)] [string] $File,
+              [Parameter(Mandatory)] [string[]] $Arguments
+            )
+            foreach ($attempt in 1..3) {
+              & $File @Arguments
+              if ($LASTEXITCODE -eq 0) { return }
+              if ($attempt -eq 3) {
+                throw "$File failed after $attempt attempts with exit code $LASTEXITCODE"
+              }
+              Start-Sleep -Seconds (15 * $attempt)
+            }
+          }
+          Invoke-NativeWithRetry choco @("install", "miktex", "--yes", "--no-progress")
           $env:PATH = "C:\Program Files\MiKTeX\miktex\bin\x64;$env:PATH"
-          initexmf --admin --set-config-value=[MPM]AutoInstall=1
-          mpm --admin --update-db
-          mpm --admin --install=latexmk
+          Invoke-NativeWithRetry initexmf @("--admin", "--set-config-value=[MPM]AutoInstall=1")
+          Invoke-NativeWithRetry mpm @("--admin", "--update-db")
+          Invoke-NativeWithRetry mpm @("--admin", "--install=latexmk")
       - run: cabal update
       - run: cabal build exe:tex2ss
       - name: Run real pdfLaTeX doctor and build on Linux
