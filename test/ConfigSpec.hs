@@ -10,7 +10,8 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit ((@?=), assertBool, testCase)
 import Tex2ss.Config (loadBundleMetadata, loadSiteConfig)
 import Tex2ss.Types
-  ( BundleMetadata (metadataGenerator, metadataPdfName)
+  ( AnalyzerSpec (AnalyzerSpec)
+  , BundleMetadata (metadataAnalysisInputs, metadataGenerator, metadataPdfName, metadataPostAnalyzer)
   , PdfEngine (..)
   , PdfName (PdfName)
   , SiteConfig (configPdfEngine)
@@ -61,6 +62,30 @@ tests =
           ByteString.writeFile path "{\"schema_version\":1,\"title\":\"x\",\"generator\":\"tree.lua\"}"
           result <- loadBundleMetadata path
           fmap metadataGenerator result @?= Right (Just "tree.lua")
+    , testCase "accepts an explicit post-analyzer contract" $
+        withSystemTempDirectory "tex2ss-meta" $ \root -> do
+          let path = root </> "meta.json"
+          ByteString.writeFile
+            path
+            "{\"schema_version\":1,\"title\":\"x\",\"generator\":\"tree.lua\",\"analysis_inputs\":[\"example.outline\"],\"post_analyzer\":{\"script\":\"outline.lua\",\"namespace\":\"example.outline\",\"schema_version\":1}}"
+          result <- loadBundleMetadata path
+          fmap metadataAnalysisInputs result @?= Right ["example.outline"]
+          fmap metadataPostAnalyzer result @?= Right (Just $ AnalyzerSpec "outline.lua" "example.outline" 1)
+    , testCase "rejects ambiguous analyzer contracts" $
+        withSystemTempDirectory "tex2ss-meta" $ \root -> do
+          let path = root </> "meta.json"
+              invalidDocuments =
+                [ "{\"schema_version\":1,\"title\":\"x\",\"analysis_inputs\":[\"example.outline\"]}"
+                , "{\"schema_version\":1,\"title\":\"x\",\"generator\":\"tree.lua\",\"analysis_inputs\":[\"outline\"]}"
+                , "{\"schema_version\":1,\"title\":\"x\",\"generator\":\"tree.lua\",\"analysis_inputs\":[\"example.outline\",\"example.outline\"]}"
+                , "{\"schema_version\":1,\"title\":\"x\",\"post_analyzer\":{\"script\":\"outline.txt\",\"namespace\":\"example.outline\",\"schema_version\":1}}"
+                , "{\"schema_version\":1,\"title\":\"x\",\"post_analyzer\":{\"script\":\"outline.lua\",\"namespace\":\"Example.outline\",\"schema_version\":1}}"
+                , "{\"schema_version\":1,\"title\":\"x\",\"post_analyzer\":{\"script\":\"outline.lua\",\"namespace\":\"example.outline\",\"schema_version\":0}}"
+                ]
+          forM_ invalidDocuments $ \document -> do
+            ByteString.writeFile path document
+            result <- loadBundleMetadata path
+            assertBool "expected invalid analyzer contract" (either (const True) (const False) result)
     , testCase "accepts a portable PDF filename stem" $
         withSystemTempDirectory "tex2ss-meta" $ \root -> do
           let path = root </> "meta.json"

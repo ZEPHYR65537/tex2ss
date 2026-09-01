@@ -14,6 +14,7 @@ controlled include expansion + deferred LaTeX generator fragments
                   -> Pandoc readLaTeX (once per rebuilt bundle)
                   -> direct Pandoc block splice
                   -> ordered in-process Lua filters
+                  -> optional post_analyzer AnalysisExport snapshot
                   -> residual RawTeX validation
                   -> Pandoc HTML5 writer
                   -> Hakyll template and route
@@ -25,6 +26,7 @@ controlled include expansion + deferred LaTeX generator fragments
    SHA-256 manifest + snapshot commit -> public/
 
 assembled LaTeX + in-process lowering of direct Pandoc blocks
+                  + descendant AnalysisExport fold (deepest slot first)
                   + declared resource manifests
                   |
                   v
@@ -47,6 +49,9 @@ structured latexmk invocation with the configured engine per changed bundle
 - Pandoc owns the document AST, Lua filter model, and HTML conversion.
 - Generator output is explicit block-level `deferred_latex` or
   `pandoc_blocks`; ordinary strings have no implicit reader or target format.
+- `post_analyzer` reads only the current filtered AST and returns a namespaced,
+  versioned open value. Metadata-declared `analysis_inputs` make only matching
+  strict-descendant exports visible to the current generator.
 - Hakyll owns tracked inputs, incremental compilation, templates, and routes.
 - `latexmk` and the selected `pdflatex`/`xelatex`/`lualatex` executable own TeX
   execution for the single M2 PDF recipe.
@@ -69,6 +74,15 @@ Includes and filters are explicit Hakyll content dependencies. Hakyll builds
 into a persistent candidate directory; tex2ss prunes stale routes, hashes the
 candidate, and only then swaps the canonical `public/` snapshot. Compiler
 failure therefore leaves the previous successful site intact.
+
+For upward AST analysis, a page saves its successful optional export in a
+typed JSON Hakyll snapshot. An ancestor loads snapshots only for descendant
+bundles whose configured namespace appears in its `analysis_inputs`; this load
+both orders compilation and records the dependency. Slot-prefix direction makes
+the graph acyclic. The current page, siblings, and ancestors are never
+available. PDF uses the same rule over a deepest-slot-first plan before staging
+each ancestor's LaTeX. Analyzer failure aborts the candidate and preserves both
+published snapshots.
 
 PDF outputs retain the slot directory and use its final segment as the default
 basename (`index.pdf`, `guide/guide.pdf`); bundle metadata may override only the

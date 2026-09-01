@@ -34,6 +34,7 @@ library
   import: warnings
   hs-source-dirs: src
   exposed-modules:
+    Tex2ss.Analysis
     Tex2ss.App
     Tex2ss.Build
     Tex2ss.Config
@@ -99,6 +100,7 @@ test-suite tex2ss-test
     PandocSpec
     PathsSpec
     PdfSpec
+    PostAnalysisSpec
   build-depends:
     aeson,
     base,

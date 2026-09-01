@@ -7,8 +7,8 @@ Hakyll templates/routes/assets, transactional output, and local watch/serve.
 
 The M1 baseline intentionally did not freeze or emulate unfinished contracts:
 
-- generators, post analyzers, virtual bundles, and virtual routes are not
-  exposed.
+- generators, post analyzers, virtual bundles, and virtual routes were not
+  part of the M1 contract.
 - deploy providers and deploy Lua scripts are not exposed.
 - selective slot/regex builds are not exposed; `--all` is the default.
 - unsupported contentful RawTeX must be consumed by an ordered filter or the
@@ -18,4 +18,6 @@ The current experimental branch has started M2 with `build --format pdf`, one
 structured `latexmk` recipe with a root-selected PDF engine, slot-shaped `pdfs/` outputs, incremental
 fingerprints, a candidate manifest, atomic publication, failure preservation,
 and a real `doctor` compile probe. Arbitrary and multiple recipes remain later
-M2 work.
+M2 work. Later experimental M2 slices add block generators and upward-only
+`post_analyzer` exports without changing the M1 baseline or adding virtual
+bundles.

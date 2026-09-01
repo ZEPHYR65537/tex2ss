@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "title": "Post-analysis tree",
+  "visibility": "published",
+  "generator": "tree.lua",
+  "analysis_inputs": ["example.outline"]
+}
+

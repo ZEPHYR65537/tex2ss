@@ -29,13 +29,14 @@ import Data.Aeson
   )
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
-import Data.List (find, findIndex)
+import Data.List (find, findIndex, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
+import Data.Ord (Down (Down))
 import System.Directory
   ( copyFile
   , createDirectory
@@ -61,6 +62,7 @@ import System.Process
   , readProcessWithExitCode
   )
 import Tex2ss.Build (BuildPlan (..), prepareBuildPlan)
+import Tex2ss.Analysis (AnalysisExport, selectDescendantExports)
 import Tex2ss.Config (loadSiteConfig)
 import Tex2ss.Diagnostics
   ( Diagnostic (diagnosticHint)
@@ -76,13 +78,14 @@ import Tex2ss.Manifest
   )
 import Tex2ss.Pandoc
   ( PreparedBundle (preparedPandocFragments)
-  , prepareBundleSource
+  , analyzePreparedBundle
+  , prepareBundleSourceWith
   , renderBundleLaTeX
   )
 import Tex2ss.Paths (mkProjectPaths)
 import Tex2ss.Types
   ( Bundle (..)
-  , BundleMetadata (metadataPdfName)
+  , BundleMetadata (metadataAnalysisInputs, metadataPdfName)
   , PdfEngine (..)
   , ProjectPaths (..)
   , SiteConfig (configPdfEngine)
@@ -216,14 +219,18 @@ buildPdfUnlocked environment runner root includeDrafts = do
           resetDirectory candidate
           resetDirectory temporary
           oldState <- loadPdfState (pdfStatePath paths)
+          let orderedBundles =
+                sortOn
+                  (Down . length . slotSegments . bundleSlot)
+                  (planBundles plan)
           compiled <-
             foldM
               (compileBundle environment runner plan oldState)
-              (Right Map.empty)
-              (planBundles plan)
+              (Right (Map.empty, []))
+              orderedBundles
           case compiled of
             Left problems -> pure (Left problems)
-            Right newEntries -> do
+            Right (newEntries, _) -> do
               writePdfState (pdfStatePath paths) (PdfState newEntries)
               committed <- commitPdfSnapshot paths
               case committed of
@@ -235,11 +242,11 @@ compileBundle
   -> LatexRunner
   -> BuildPlan
   -> PdfState
-  -> Either [Diagnostic] (Map FilePath PdfCacheEntry)
+  -> Either [Diagnostic] (Map FilePath PdfCacheEntry, [AnalysisExport])
   -> Bundle
-  -> IO (Either [Diagnostic] (Map FilePath PdfCacheEntry))
+  -> IO (Either [Diagnostic] (Map FilePath PdfCacheEntry, [AnalysisExport]))
 compileBundle _ _ _ _ result@(Left _) _ = pure result
-compileBundle environment runner plan oldState (Right entries) bundle = do
+compileBundle environment runner plan oldState (Right (entries, exports)) bundle = do
   let paths = planPaths plan
       relativeOutput =
         pdfOutputPath
@@ -247,35 +254,50 @@ compileBundle environment runner plan oldState (Right entries) bundle = do
           (metadataPdfName $ bundleMetadata bundle)
       publishedOutput = projectPdfs paths </> relativeOutput
       candidateOutput = pdfWorkDirectory paths </> relativeOutput
-  prepared <- prepareBundleSource paths (planSiteIndex plan) bundle
+      descendantExports =
+        selectDescendantExports
+          bundle
+          (metadataAnalysisInputs $ bundleMetadata bundle)
+          exports
+  prepared <- prepareBundleSourceWith paths (planSiteIndex plan) descendantExports bundle
   case prepared of
     Left problems -> pure (Left problems)
     Right preparedBundle -> do
-      lowered <- renderBundleLaTeX (bundleIndexPath bundle) preparedBundle
-      case lowered of
+      analyzed <- analyzePreparedBundle paths (planConfig plan) bundle preparedBundle
+      case analyzed of
         Left problems -> pure (Left problems)
-        Right source -> do
-          fingerprint <-
-            pdfInputFingerprint
-              environment
-              paths
-              bundle
-              source
-              (preparedPandocFragments preparedBundle)
-          reusable <- cachedOutputIsReusable oldState relativeOutput fingerprint publishedOutput
-          if reusable
-            then do
-              createDirectoryIfMissing True (takeDirectory candidateOutput)
-              copyFile publishedOutput candidateOutput
-              outputDigest <- fileSha256 candidateOutput
-              pure . Right $ Map.insert relativeOutput (PdfCacheEntry fingerprint outputDigest) entries
-            else do
-              rendered <- compilePdfBundle environment runner paths bundle source candidateOutput
-              case rendered of
-                Left problems -> pure (Left problems)
-                Right () -> do
+        Right exported -> do
+          lowered <- renderBundleLaTeX (bundleIndexPath bundle) preparedBundle
+          case lowered of
+            Left problems -> pure (Left problems)
+            Right source -> do
+              fingerprint <-
+                pdfInputFingerprint
+                  environment
+                  paths
+                  bundle
+                  source
+                  (preparedPandocFragments preparedBundle)
+              reusable <- cachedOutputIsReusable oldState relativeOutput fingerprint publishedOutput
+              if reusable
+                then do
+                  createDirectoryIfMissing True (takeDirectory candidateOutput)
+                  copyFile publishedOutput candidateOutput
                   outputDigest <- fileSha256 candidateOutput
-                  pure . Right $ Map.insert relativeOutput (PdfCacheEntry fingerprint outputDigest) entries
+                  pure . Right $
+                    ( Map.insert relativeOutput (PdfCacheEntry fingerprint outputDigest) entries
+                    , maybe exports (: exports) exported
+                    )
+                else do
+                  rendered <- compilePdfBundle environment runner paths bundle source candidateOutput
+                  case rendered of
+                    Left problems -> pure (Left problems)
+                    Right () -> do
+                      outputDigest <- fileSha256 candidateOutput
+                      pure . Right $
+                        ( Map.insert relativeOutput (PdfCacheEntry fingerprint outputDigest) entries
+                        , maybe exports (: exports) exported
+                        )
 
 compilePdfBundle
   :: LatexEnvironment

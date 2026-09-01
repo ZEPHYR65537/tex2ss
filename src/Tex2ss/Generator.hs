@@ -9,6 +9,7 @@ module Tex2ss.Generator
   , assembleGeneratedSource
   , pandocFragmentMarker
   , runPreGenerator
+  , runPreGeneratorWith
   ) where
 
 import Control.Exception (try)
@@ -29,9 +30,11 @@ import Text.Pandoc.Definition (Block (RawBlock), Format (..), Inline (RawInline)
 import Text.Pandoc.Error (renderError)
 import Text.Pandoc.Lua (Global (PANDOC_SCRIPT_FILE), runLua, setGlobals)
 import Text.Pandoc.Walk (query)
+import Tex2ss.Analysis (AnalysisExport, selectDescendantExports)
 import Tex2ss.Diagnostics (Diagnostic, Severity (Error), diagnosticAt)
 import Tex2ss.Types
-  ( Bundle (bundleIndexPath, bundleSlot)
+  ( Bundle (bundleIndexPath, bundleMetadata, bundleSlot)
+  , BundleMetadata (metadataAnalysisInputs)
   , PageRef
   , SiteIndex (sitePages)
   , renderSlot
@@ -56,6 +59,7 @@ data AssembledSource = AssembledSource
 data GeneratorContext = GeneratorContext
   { contextCurrentSlot :: Text
   , contextPages :: [PageRef]
+  , contextAnalysisExports :: [AnalysisExport]
   }
 
 instance ToJSON GeneratorContext where
@@ -63,14 +67,30 @@ instance ToJSON GeneratorContext where
     object
       [ "document" .= object ["slot" .= contextCurrentSlot context]
       , "site_index" .= object ["pages" .= contextPages context]
+      , "analysis_exports" .= contextAnalysisExports context
       ]
 
 runPreGenerator :: FilePath -> SiteIndex -> Bundle -> IO (Either [Diagnostic] GeneratorResult)
-runPreGenerator scriptPath siteIndex bundle = do
-  let context =
+runPreGenerator scriptPath siteIndex bundle =
+  runPreGeneratorWith scriptPath siteIndex [] bundle
+
+runPreGeneratorWith
+  :: FilePath
+  -> SiteIndex
+  -> [AnalysisExport]
+  -> Bundle
+  -> IO (Either [Diagnostic] GeneratorResult)
+runPreGeneratorWith scriptPath siteIndex analysisExports bundle = do
+  let visibleExports =
+        selectDescendantExports
+          bundle
+          (metadataAnalysisInputs $ bundleMetadata bundle)
+          analysisExports
+      context =
         GeneratorContext
           { contextCurrentSlot = renderSlot (bundleSlot bundle)
           , contextPages = Map.elems (sitePages siteIndex)
+          , contextAnalysisExports = visibleExports
           }
   operation <- try @PandocError . runIO $ do
     generated <- runLua $ do

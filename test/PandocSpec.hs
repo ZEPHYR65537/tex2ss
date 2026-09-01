@@ -86,7 +86,7 @@ fixture root = do
           "default"
           ["filters/test.lua"]
           PdfLaTeX
-      metadata = BundleMetadata 1 "Page" Nothing Nothing Nothing Published Nothing [] Map.empty Nothing
+      metadata = BundleMetadata 1 "Page" Nothing Nothing Nothing Published Nothing [] Map.empty Nothing Nothing []
       bundle = Bundle (Slot []) bundleDirectory indexPath metaPath metadata
   pure (config, bundle, filterPath)
 

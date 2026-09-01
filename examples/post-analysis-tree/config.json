@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "site": {
+    "title": "Post-analysis tree",
+    "lang": "en"
+  },
+  "templates": {
+    "default": "default.html"
+  },
+  "default_template": "default",
+  "filters": [],
+  "pdf_engine": "pdflatex"
+}
+

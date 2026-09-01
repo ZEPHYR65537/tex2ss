@@ -8,6 +8,7 @@ import qualified IncludeSpec
 import qualified PandocSpec
 import qualified PathsSpec
 import qualified PdfSpec
+import qualified PostAnalysisSpec
 import Test.Tasty (defaultMain, testGroup)
 
 main :: IO ()
@@ -23,4 +24,5 @@ main =
       , PandocSpec.tests
       , PathsSpec.tests
       , PdfSpec.tests
+      , PostAnalysisSpec.tests
       ]

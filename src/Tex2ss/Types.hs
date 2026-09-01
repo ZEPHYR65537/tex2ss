@@ -2,7 +2,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Tex2ss.Types
-  ( BuildTarget (..)
+  ( AnalyzerSpec (..)
+  , BuildTarget (..)
   , Bundle (..)
   , BundleMetadata (..)
   , PageRef (..)
@@ -103,6 +104,13 @@ data SiteConfig = SiteConfig
   }
   deriving stock (Eq, Show, Generic)
 
+data AnalyzerSpec = AnalyzerSpec
+  { analyzerScript :: FilePath
+  , analyzerNamespace :: Text
+  , analyzerSchemaVersion :: Int
+  }
+  deriving stock (Eq, Show, Generic)
+
 data BundleMetadata = BundleMetadata
   { metadataSchemaVersion :: Int
   , metadataTitle :: Text
@@ -114,6 +122,8 @@ data BundleMetadata = BundleMetadata
   , metadataFilters :: [FilePath]
   , metadataData :: Map Text Value
   , metadataPdfName :: Maybe PdfName
+  , metadataPostAnalyzer :: Maybe AnalyzerSpec
+  , metadataAnalysisInputs :: [Text]
   }
   deriving stock (Eq, Show, Generic)
 

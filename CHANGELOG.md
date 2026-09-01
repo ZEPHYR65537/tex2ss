@@ -16,3 +16,7 @@
 - Add the concise root `pdf_engine` enum for pdfLaTeX, XeLaTeX, or LuaLaTeX;
   use the selected engine in the structured recipe, doctor probe, diagnostics,
   and cache fingerprint.
+- Add the experimental upward-only `post_analyzer` protocol: open namespaced
+  exports from filtered Pandoc AST, explicit ancestor namespace inputs, Hakyll
+  analysis snapshots, deepest-first PDF scheduling, strict direction/size
+  validation, and a shared HTML/PDF tree fixture.

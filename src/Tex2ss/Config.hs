@@ -34,7 +34,8 @@ import System.FilePath (takeExtension)
 import Tex2ss.Diagnostics (Diagnostic, Severity (Error), diagnosticAt)
 import Tex2ss.Paths (isPortableName, resolveExistingUnder)
 import Tex2ss.Types
-  ( BundleMetadata (..)
+  ( AnalyzerSpec (..)
+  , BundleMetadata (..)
   , PdfEngine (..)
   , PdfName (..)
   , ProjectPaths (..)
@@ -63,6 +64,19 @@ instance FromJSON PdfEngine where
       "xelatex" -> pure XeLaTeX
       "lualatex" -> pure LuaLaTeX
       _ -> fail "pdf_engine must be 'pdflatex', 'xelatex', or 'lualatex'"
+
+instance FromJSON AnalyzerSpec where
+  parseJSON = withObject "post_analyzer" $ \object -> do
+    rejectUnknown "post_analyzer" analyzerKeys object
+    script <- object .: "script"
+    namespace <- object .: "namespace"
+    version <- object .: "schema_version"
+    validateExtension ".lua" "post_analyzer script" script
+    unless (validAnalysisNamespace namespace) $
+      fail "post_analyzer namespace must be a portable dotted name such as example.outline"
+    when (version < (1 :: Int)) $
+      fail "post_analyzer schema_version must be a positive integer"
+    pure $ AnalyzerSpec script namespace version
 
 instance FromJSON SiteSettings where
   parseJSON = withObject "site" $ \object -> do
@@ -109,8 +123,17 @@ instance FromJSON BundleMetadata where
     parsedDate <- traverse parseDay rawDate
     filters <- object .:? "filters" .!= []
     generator <- object .:? "generator"
+    postAnalyzer <- object .:? "post_analyzer"
+    analysisInputs <- object .:? "analysis_inputs" .!= []
     traverse_ (validateExtension ".lua" "filter") filters
     traverse_ (validateExtension ".lua" "generator") generator
+    traverse_ validateAnalysisInput analysisInputs
+    when (length analysisInputs /= Set.size (Set.fromList analysisInputs)) $
+      fail "analysis_inputs must not contain duplicates"
+    when (not $ null analysisInputs) $
+      case generator of
+        Nothing -> fail "analysis_inputs requires generator"
+        Just _ -> pure ()
     BundleMetadata version title
       <$> object .:? "author"
       <*> pure parsedDate
@@ -120,6 +143,8 @@ instance FromJSON BundleMetadata where
       <*> pure filters
       <*> object .:? "data" .!= Map.empty
       <*> object .:? "pdf_name"
+      <*> pure postAnalyzer
+      <*> pure analysisInputs
    where
     parseDay :: Text -> Aeson.Parser Day
     parseDay value =
@@ -175,11 +200,33 @@ validateExtension expected label path =
   unless (takeExtension path == expected) $
     fail $ label <> " path must end in " <> expected
 
+validateAnalysisInput :: Text -> Aeson.Parser ()
+validateAnalysisInput namespace =
+  unless (validAnalysisNamespace namespace) $
+    fail "analysis_inputs entries must be portable dotted names such as example.outline"
+
+validAnalysisNamespace :: Text -> Bool
+validAnalysisNamespace namespace =
+  case Text.splitOn "." namespace of
+    first : second : rest -> all validSegment (first : second : rest)
+    _ -> False
+ where
+  validSegment segment =
+    case Text.uncons segment of
+      Nothing -> False
+      Just (first, remaining) -> validFirst first && Text.all validRest remaining
+  validFirst character =
+    ('a' <= character && character <= 'z') || ('0' <= character && character <= '9')
+  validRest character = validFirst character || character == '_' || character == '-'
+
 siteKeys :: Set Text
 siteKeys = Set.fromList ["title", "description", "base_url", "lang", "author", "email"]
 
 configKeys :: Set Text
 configKeys = Set.fromList ["schema_version", "site", "templates", "default_template", "filters", "pdf_engine"]
 
+analyzerKeys :: Set Text
+analyzerKeys = Set.fromList ["script", "namespace", "schema_version"]
+
 metadataKeys :: Set Text
-metadataKeys = Set.fromList ["schema_version", "title", "author", "date", "template", "visibility", "generator", "filters", "data", "pdf_name"]
+metadataKeys = Set.fromList ["schema_version", "title", "author", "date", "template", "visibility", "generator", "filters", "data", "pdf_name", "post_analyzer", "analysis_inputs"]

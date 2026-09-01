@@ -39,11 +39,15 @@ slot-shaped, recognizable files such as `pdfs/index.pdf` and
 override its basename with the optional `meta.json` field `pdf_name`.
 
 The experimental bundle-local pre-generator receives a read-only SiteIndex and
-returns named block fragments. A fragment explicitly contains either deferred
-LaTeX or portable `pandoc.Blocks`: HTML inserts direct blocks before filters,
-while PDF lowers the same AST with the linked Pandoc LaTeX writer. Neither path
-starts a Pandoc CLI process. The experiment does not expose analyzers, virtual
-bundles, deployment, arbitrary or multiple PDF recipes, or selective-build APIs.
+explicitly selected descendant `AnalysisExport` values, then returns named block
+fragments. A fragment contains either deferred LaTeX or portable
+`pandoc.Blocks`: HTML inserts direct blocks before filters, while PDF lowers the
+same AST with the linked Pandoc LaTeX writer. A bundle `post_analyzer` can export
+an open, versioned value from its filtered AST only to strict slot ancestors;
+the three-level runnable fixture is under
+[`examples/post-analysis-tree`](examples/post-analysis-tree). Neither path
+starts a Pandoc CLI process. Virtual bundles, deployment, arbitrary or multiple
+PDF recipes, and selective-build APIs remain out of scope.
 
 See [the architecture](docs/architecture.md), [schema v1](docs/schemas.md), and
 [the explicit M1 boundary](docs/m1-scope.md) for implementation contracts.

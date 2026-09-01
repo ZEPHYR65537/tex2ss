@@ -8,11 +8,11 @@ module Tex2ss.Build
 
 import Control.Exception (IOException, finally, try)
 import Control.Monad (forM, forM_, unless, void, when)
-import Data.Aeson (Value (..), encode)
+import Data.Aeson (Value (..), eitherDecode, encode)
 import qualified Data.ByteString.Lazy.Char8 as LazyChar8
 import Data.List (isPrefixOf, isSuffixOf, nub, sort)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 import Data.Time (defaultTimeLocale, formatTime)
@@ -35,11 +35,13 @@ import Hakyll
   , getResourceBody
   , loadAndApplyTemplate
   , loadBody
+  , loadSnapshotBody
   , makeItem
   , makePatternDependency
   , match
   , route
   , rulesExtraDependencies
+  , saveSnapshot
   , templateCompiler
   , toFilePath
   , unsafeCompiler
@@ -68,6 +70,11 @@ import System.FilePath
   , (</>)
   )
 import Tex2ss.Config (loadSiteConfig, validateConfigPaths)
+import Tex2ss.Analysis
+  ( AnalysisExport
+  , analysisSnapshotName
+  , matchingAnalyzerBundles
+  )
 import Tex2ss.Diagnostics
   ( Diagnostic (diagnosticHint)
   , Severity (Error)
@@ -78,11 +85,12 @@ import Tex2ss.Diagnostics
 import Tex2ss.Discovery (discoverBundles)
 import Tex2ss.Include (ExpandedSource (expandedDependencies), expandBundleSource)
 import Tex2ss.Manifest (commitHtmlSnapshot, htmlWorkDirectory)
-import Tex2ss.Pandoc (renderBundleHtml)
+import Tex2ss.Pandoc (RenderedBundle (..), renderBundleHtmlWith)
 import Tex2ss.Paths (mkProjectPaths, resolveExistingUnder)
 import Tex2ss.SiteIndex (buildSiteIndex)
 import Tex2ss.Types
-  ( Bundle (..)
+  ( AnalyzerSpec (analyzerScript)
+  , Bundle (..)
   , BundleMetadata (..)
   , ProjectPaths (..)
   , SiteConfig (..)
@@ -158,6 +166,7 @@ validateBundle config bundle = do
   includeResult <- expandBundleSource (bundleDirectory bundle) (bundleIndexPath bundle)
   localFilters <- traverse (resolveExistingUnder localFilterRoot) (metadataFilters metadata)
   generator <- traverse (resolveExistingUnder localFilterRoot) (metadataGenerator metadata)
+  postAnalyzer <- traverse (resolveExistingUnder localFilterRoot . analyzerScript) (metadataPostAnalyzer metadata)
   let templateProblems =
         [ diagnosticAt
             Error
@@ -168,14 +177,16 @@ validateBundle config bundle = do
         ]
       filterProblems = [problem | Left problem <- localFilters]
       generatorProblems = maybe [] (either (: []) (const [])) generator
+      analyzerProblems = maybe [] (either (: []) (const [])) postAnalyzer
       includeProblems = either id (const []) includeResult
-      problems = templateProblems <> filterProblems <> generatorProblems <> includeProblems
+      problems = templateProblems <> filterProblems <> generatorProblems <> analyzerProblems <> includeProblems
       includes = filter (/= bundleIndexPath bundle) $ either (const []) expandedDependencies includeResult
       resolvedLocalFilters = [path | Right path <- localFilters]
       resolvedGenerator = maybe [] (either (const []) (: [])) generator
+      resolvedAnalyzer = maybe [] (either (const []) (: [])) postAnalyzer
   pure $
     if null problems
-      then Right (bundle, includes <> resolvedLocalFilters <> resolvedGenerator)
+      then Right (bundle, includes <> resolvedLocalFilters <> resolvedGenerator <> resolvedAnalyzer)
       else Left problems
 
 buildHtml :: FilePath -> Bool -> IO (Either [Diagnostic] Bool)
@@ -294,19 +305,45 @@ pageCompiler plan bundle = do
           <> allMeta
           <> Map.findWithDefault [] (bundleDirectory bundle) (planBundleDependencies plan)
           <> [projectPandoc paths </> path | path <- configFilters config]
+      analyzerBundles =
+        matchingAnalyzerBundles
+          bundle
+          (metadataAnalysisInputs $ bundleMetadata bundle)
+          (planBundles plan)
   void getResourceBody
   forM_ (nub directDependencies) $ \path ->
     void (loadBody $ projectIdentifier paths path :: Compiler String)
-  rendered <- unsafeCompiler $ renderBundleHtml paths config (planSiteIndex plan) bundle
-  html <-
+  encodedExports <-
+    forM analyzerBundles $ \candidate ->
+      loadSnapshotBody
+        (projectIdentifier paths $ bundleIndexPath candidate)
+        analysisSnapshotName
+  descendantExports <- traverse decodeAnalysisSnapshot encodedExports
+  rendered <-
+    unsafeCompiler $
+      renderBundleHtmlWith
+        paths
+        config
+        (planSiteIndex plan)
+        (catMaybes descendantExports)
+        bundle
+  compiled <-
     case rendered of
       Left problems -> fail (Text.unpack $ renderDiagnostics problems)
       Right value -> pure value
+  analysisItem <- makeItem (LazyChar8.unpack $ encode $ renderedAnalysis compiled)
+  void $ saveSnapshot analysisSnapshotName analysisItem
   let templateAlias = fromMaybe (configDefaultTemplate config) (metadataTemplate $ bundleMetadata bundle)
       selectedTemplate = configTemplates config Map.! templateAlias
       templateIdentifier = projectIdentifier paths (templatePath paths selectedTemplate)
-  makeItem (Text.unpack html)
+  makeItem (Text.unpack $ renderedHtml compiled)
     >>= loadAndApplyTemplate templateIdentifier (pageContext config bundle)
+
+decodeAnalysisSnapshot :: String -> Compiler (Maybe AnalysisExport)
+decodeAnalysisSnapshot encoded =
+  case eitherDecode (LazyChar8.pack encoded) of
+    Left problem -> fail ("invalid tex2ss analysis snapshot: " <> problem)
+    Right value -> pure value
 
 pageContext :: SiteConfig -> Bundle -> Context String
 pageContext config bundle =

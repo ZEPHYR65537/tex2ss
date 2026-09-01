@@ -48,6 +48,12 @@ and project `.latexmkrc` files cannot silently change the fixed command model.
   "template": "default",
   "visibility": "published",
   "generator": "tree.lua",
+  "analysis_inputs": ["example.outline"],
+  "post_analyzer": {
+    "script": "outline.lua",
+    "namespace": "example.outline",
+    "schema_version": 1
+  },
   "pdf_name": "post-handout",
   "filters": ["filters/local.lua"],
   "data": {
@@ -62,6 +68,25 @@ and project `.latexmkrc` files cannot silently change the fixed command model.
 `extension/` directory. The optional experimental `generator` is one `.lua`
 file relative to the same directory. Template fields receive custom values as
 `$data_<key>$`; arrays and objects are compact JSON.
+
+`post_analyzer` is an optional experimental contract. Its `.lua` script is
+relative to the same `extension/` directory. `namespace` must contain at least
+two portable dotted segments, and `schema_version` must be positive. The script
+defines `post_analyzer(document, context)` and returns one JSON-serializable
+open value. `document` is the current bundle's Pandoc AST after the ordered
+filters; tex2ss supplies the document identity, namespace, version, and producer
+identity around the returned value. One encoded export may not exceed 1 MiB.
+
+`analysis_inputs` is a duplicate-free list of namespaces read by the current
+bundle's generator. It requires `generator`. The generator receives matching
+values as `context.analysis_exports`, ordered by document/namespace. Only
+exports from strict descendants of the current slot are included: never the
+current bundle, siblings, or ancestors. Declaring a namespace is the v1
+dependency contract; Lua remains free to interpret and aggregate each open
+value. HTML stores successful exports as Hakyll snapshots, and PDF schedules
+bundles from deepest slot to root. Both targets use the same `html5` filter
+environment for this canonical analysis AST, so `FORMAT`-sensitive filters do
+not produce divergent ancestor inputs.
 
 `pdf_name` is an optional PDF basename without `.pdf`. It must match
 `[a-z0-9][a-z0-9_-]*`; paths, extensions, uppercase letters, and traversal are
