@@ -35,6 +35,7 @@ import Tex2ss.Diagnostics (Diagnostic, Severity (Error), diagnosticAt)
 import Tex2ss.Paths (isPortableName, resolveExistingUnder)
 import Tex2ss.Types
   ( BundleMetadata (..)
+  , PdfEngine (..)
   , PdfName (..)
   , ProjectPaths (..)
   , SiteConfig (..)
@@ -55,6 +56,14 @@ instance FromJSON PdfName where
       then pure (PdfName value)
       else fail "pdf_name must match [a-z0-9][a-z0-9_-]* and omit the .pdf extension"
 
+instance FromJSON PdfEngine where
+  parseJSON = withText "pdf_engine" $ \value ->
+    case value of
+      "pdflatex" -> pure PdfLaTeX
+      "xelatex" -> pure XeLaTeX
+      "lualatex" -> pure LuaLaTeX
+      _ -> fail "pdf_engine must be 'pdflatex', 'xelatex', or 'lualatex'"
+
 instance FromJSON SiteSettings where
   parseJSON = withObject "site" $ \object -> do
     rejectUnknown "site" siteKeys object
@@ -71,12 +80,17 @@ instance FromJSON SiteConfig where
     rejectUnknown "config" configKeys object
     version <- object .: "schema_version"
     when (version /= (1 :: Int)) $ fail "schema_version must be 1"
+    pdfEngine <-
+      if KeyMap.member "pdf_engine" object
+        then object .: "pdf_engine"
+        else pure PdfLaTeX
     config <-
       SiteConfig version
         <$> object .: "site"
         <*> object .: "templates"
         <*> object .: "default_template"
         <*> object .:? "filters" .!= []
+        <*> pure pdfEngine
     unless (Map.member (configDefaultTemplate config) (configTemplates config)) $
       fail "default_template must name an entry in templates"
     when (Map.null (configTemplates config)) $
@@ -165,7 +179,7 @@ siteKeys :: Set Text
 siteKeys = Set.fromList ["title", "description", "base_url", "lang", "author", "email"]
 
 configKeys :: Set Text
-configKeys = Set.fromList ["schema_version", "site", "templates", "default_template", "filters"]
+configKeys = Set.fromList ["schema_version", "site", "templates", "default_template", "filters", "pdf_engine"]
 
 metadataKeys :: Set Text
 metadataKeys = Set.fromList ["schema_version", "title", "author", "date", "template", "visibility", "generator", "filters", "data", "pdf_name"]

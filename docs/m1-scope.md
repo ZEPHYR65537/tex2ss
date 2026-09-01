@@ -15,7 +15,7 @@ The M1 baseline intentionally did not freeze or emulate unfinished contracts:
   page fails instead of silently losing semantics.
 
 The current experimental branch has started M2 with `build --format pdf`, one
-fixed structured `latexmk -pdf` recipe, slot-shaped `pdfs/` outputs, incremental
+structured `latexmk` recipe with a root-selected PDF engine, slot-shaped `pdfs/` outputs, incremental
 fingerprints, a candidate manifest, atomic publication, failure preservation,
-and a real `doctor` compile probe. Multiple configurable recipes remain later
+and a real `doctor` compile probe. Arbitrary and multiple recipes remain later
 M2 work.

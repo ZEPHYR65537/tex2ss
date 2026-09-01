@@ -6,6 +6,7 @@ module Tex2ss.Types
   , Bundle (..)
   , BundleMetadata (..)
   , PageRef (..)
+  , PdfEngine (..)
   , PdfName (..)
   , ProjectPaths (..)
   , SiteConfig (..)
@@ -16,6 +17,7 @@ module Tex2ss.Types
   , isVisible
   , pdfOutputPath
   , renderSlot
+  , renderPdfEngine
   , slotOutputPath
   , slotPdfOutputPath
   , slotRoute
@@ -38,6 +40,14 @@ newtype Slot = Slot {slotSegments :: [Text]}
 
 newtype PdfName = PdfName {unPdfName :: Text}
   deriving stock (Eq, Ord, Show, Generic)
+
+data PdfEngine = PdfLaTeX | XeLaTeX | LuaLaTeX
+  deriving stock (Eq, Ord, Show, Generic)
+
+renderPdfEngine :: PdfEngine -> Text
+renderPdfEngine PdfLaTeX = "pdflatex"
+renderPdfEngine XeLaTeX = "xelatex"
+renderPdfEngine LuaLaTeX = "lualatex"
 
 renderSlot :: Slot -> Text
 renderSlot (Slot []) = "."
@@ -89,6 +99,7 @@ data SiteConfig = SiteConfig
   , configTemplates :: Map Text FilePath
   , configDefaultTemplate :: Text
   , configFilters :: [FilePath]
+  , configPdfEngine :: PdfEngine
   }
   deriving stock (Eq, Show, Generic)
 

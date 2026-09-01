@@ -39,6 +39,7 @@ import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitWith)
 import System.FilePath (takeFileName)
 import System.IO (stderr)
 import Tex2ss.Build (BuildPlan (..), buildHtml, prepareBuildPlan)
+import Tex2ss.Config (loadSiteConfig)
 import Tex2ss.Diagnostics
   ( Diagnostic
   , renderDiagnostics
@@ -51,7 +52,12 @@ import Tex2ss.Pdf
   )
 import Tex2ss.Scaffold (initializeGitRepository, initializeProject, initializeSite, initializeView)
 import Tex2ss.Serve (serveProject)
-import Tex2ss.Types (BuildTarget (..))
+import Tex2ss.Types
+  ( BuildTarget (..)
+  , ProjectPaths (projectConfig)
+  , SiteConfig (configPdfEngine)
+  , renderPdfEngine
+  )
 
 data Command
   = NewSite FilePath FilePath
@@ -87,18 +93,31 @@ runCommand commandValue =
           initializeGitRepository target
             >>= reportResult (const $ putStrLn $ "initialized site: " <> target)
     Doctor requested -> withProject requested $ \root -> do
+      configResult <- loadSiteConfig (projectConfig $ mkProjectPaths root)
       projectResult <- prepareBuildPlan root True
-      latexResult <- diagnoseLatexEnvironment
-      case (projectResult, latexResult) of
-        (Left projectProblems, Left latexProblems) -> reportProblems 3 (projectProblems <> latexProblems)
-        (Left problems, _) -> reportProblems 3 problems
-        (_, Left problems) -> reportProblems 3 problems
-        (Right plan, Right environment) -> do
-          putStrLn $ "project is valid: " <> show (length $ planAllBundles plan) <> " physical bundle(s)"
-          putStrLn $ "latexmk: " <> Text.unpack (latexmkVersion environment) <> " (" <> latexmkExecutable environment <> ")"
-          putStrLn $ "pdflatex: " <> Text.unpack (latexEngineVersion environment) <> " (" <> latexEngineExecutable environment <> ")"
-          putStrLn "LaTeX compile probe succeeded"
-          pure ExitSuccess
+      case configResult of
+        Left configProblems ->
+          case projectResult of
+            Left projectProblems -> reportProblems 3 projectProblems
+            Right _ -> reportProblems 3 configProblems
+        Right config -> do
+          latexResult <- diagnoseLatexEnvironment (configPdfEngine config)
+          case (projectResult, latexResult) of
+            (Left projectProblems, Left latexProblems) -> reportProblems 3 (projectProblems <> latexProblems)
+            (Left problems, _) -> reportProblems 3 problems
+            (_, Left problems) -> reportProblems 3 problems
+            (Right plan, Right environment) -> do
+              putStrLn $ "project is valid: " <> show (length $ planAllBundles plan) <> " physical bundle(s)"
+              putStrLn $ "latexmk: " <> Text.unpack (latexmkVersion environment) <> " (" <> latexmkExecutable environment <> ")"
+              putStrLn $
+                Text.unpack (renderPdfEngine $ latexEngine environment)
+                  <> ": "
+                  <> Text.unpack (latexEngineVersion environment)
+                  <> " ("
+                  <> latexEngineExecutable environment
+                  <> ")"
+              putStrLn "LaTeX compile probe succeeded"
+              pure ExitSuccess
     Build Pdf includeDrafts -> withProject Nothing $ \root -> do
       result <- buildPdf root includeDrafts
       case result of

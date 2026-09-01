@@ -145,6 +145,7 @@ siteConfig title =
       , "templates" .= object ["default" .= ("default.html" :: Text)]
       , "default_template" .= ("default" :: Text)
       , "filters" .= ([] :: [Text])
+      , "pdf_engine" .= ("pdflatex" :: Text)
       ]
 
 viewMetadata :: Text -> LazyByteString.ByteString

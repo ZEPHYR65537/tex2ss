@@ -21,13 +21,21 @@ collisions.
     "default": "default.html"
   },
   "default_template": "default",
-  "filters": ["filters/references.lua"]
+  "filters": ["filters/references.lua"],
+  "pdf_engine": "pdflatex"
 }
 ```
 
 Template paths are relative to `site/templates/` and must end in `.html`.
 Global filter paths are relative to `pandoc/` and must end in `.lua`. Every
 path must exist and remain inside its owning root after canonicalization.
+
+`pdf_engine` is optional and defaults to `pdflatex`. Its only other accepted
+values are `xelatex` and `lualatex`. It selects one fixed, structured `latexmk`
+recipe (`-pdf`, `-xelatex`, or `-lualatex` respectively); it does not accept a
+path, argv, shell command, recipe name, or bundle override. Explicit `null` and
+unknown values fail the strict schema. The recipe uses `-norc`, so system, user,
+and project `.latexmkrc` files cannot silently change the fixed command model.
 
 ## `meta.json`
 
@@ -82,9 +90,9 @@ Placeholders use a standalone `\\tex2ssgenerated{name}` line. Direct Pandoc
 blocks may not contain raw target nodes. These Lua field names remain an
 experimental protocol rather than a stable schema-v1 compatibility promise.
 
-M2 intentionally adds no PDF recipe field to schema v1. The first slice has one
-fixed, structured `latexmk -pdf` recipe; configurable recipe schemas will be
-introduced only after this execution and transaction model is stable.
+M2.2 deliberately adds only the root `pdf_engine` enum, not a generic recipe
+schema. Multiple recipes, arbitrary tool paths, and user-provided command lines
+remain outside schema v1.
 
 ## Physical bundles and routes
 

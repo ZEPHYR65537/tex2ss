@@ -9,6 +9,8 @@ module Tex2ss.Pdf
   , diagnoseLatexEnvironment
   , inspectLatexEnvironment
   , inspectLatexEnvironmentWith
+  , latexmkEngineArgument
+  , latexmkRecipeOptions
   , probeLatexEnvironmentWith
   ) where
 
@@ -59,6 +61,7 @@ import System.Process
   , readProcessWithExitCode
   )
 import Tex2ss.Build (BuildPlan (..), prepareBuildPlan)
+import Tex2ss.Config (loadSiteConfig)
 import Tex2ss.Diagnostics
   ( Diagnostic (diagnosticHint)
   , Severity (Error)
@@ -80,14 +83,18 @@ import Tex2ss.Paths (mkProjectPaths)
 import Tex2ss.Types
   ( Bundle (..)
   , BundleMetadata (metadataPdfName)
+  , PdfEngine (..)
   , ProjectPaths (..)
+  , SiteConfig (configPdfEngine)
   , Slot (..)
   , pdfOutputPath
+  , renderPdfEngine
   )
 
 data LatexEnvironment = LatexEnvironment
   { latexmkExecutable :: FilePath
   , latexmkVersion :: Text
+  , latexEngine :: PdfEngine
   , latexEngineExecutable :: FilePath
   , latexEngineVersion :: Text
   }
@@ -149,10 +156,15 @@ type LatexRunner = LatexEnvironment -> LatexInvocation -> IO LatexRunResult
 
 buildPdf :: FilePath -> Bool -> IO (Either [Diagnostic] Bool)
 buildPdf root includeDrafts = do
-  environment <- inspectLatexEnvironment
-  case environment of
+  let paths = mkProjectPaths root
+  configResult <- loadSiteConfig (projectConfig paths)
+  case configResult of
     Left problems -> pure (Left problems)
-    Right available -> buildPdfWith available runLatexmk root includeDrafts
+    Right config -> do
+      environment <- inspectLatexEnvironment (configPdfEngine config)
+      case environment of
+        Left problems -> pure (Left problems)
+        Right available -> buildPdfWith available runLatexmk root includeDrafts
 
 buildPdfWith :: LatexEnvironment -> LatexRunner -> FilePath -> Bool -> IO (Either [Diagnostic] Bool)
 buildPdfWith environment runner root includeDrafts = do
@@ -184,25 +196,39 @@ buildPdfUnlocked environment runner root includeDrafts = do
   case planResult of
     Left problems -> pure (Left problems)
     Right plan -> do
-      let paths = planPaths plan
-          candidate = pdfWorkDirectory paths
-          temporary = pdfTemporaryDirectory paths
-      resetDirectory candidate
-      resetDirectory temporary
-      oldState <- loadPdfState (pdfStatePath paths)
-      compiled <-
-        foldM
-          (compileBundle environment runner plan oldState)
-          (Right Map.empty)
-          (planBundles plan)
-      case compiled of
-        Left problems -> pure (Left problems)
-        Right newEntries -> do
-          writePdfState (pdfStatePath paths) (PdfState newEntries)
-          committed <- commitPdfSnapshot paths
-          case committed of
+      if configPdfEngine (planConfig plan) /= latexEngine environment
+        then
+          pure . Left $
+            [ diagnosticAt
+                Error
+                "pdf.engine-mismatch"
+                (projectConfig $ planPaths plan)
+                ( "configured PDF engine is "
+                    <> renderPdfEngine (configPdfEngine $ planConfig plan)
+                    <> ", but the build environment selected "
+                    <> renderPdfEngine (latexEngine environment)
+                )
+            ]
+        else do
+          let paths = planPaths plan
+              candidate = pdfWorkDirectory paths
+              temporary = pdfTemporaryDirectory paths
+          resetDirectory candidate
+          resetDirectory temporary
+          oldState <- loadPdfState (pdfStatePath paths)
+          compiled <-
+            foldM
+              (compileBundle environment runner plan oldState)
+              (Right Map.empty)
+              (planBundles plan)
+          case compiled of
             Left problems -> pure (Left problems)
-            Right changed -> pure (Right changed)
+            Right newEntries -> do
+              writePdfState (pdfStatePath paths) (PdfState newEntries)
+              committed <- commitPdfSnapshot paths
+              case committed of
+                Left problems -> pure (Left problems)
+                Right changed -> pure (Right changed)
 
 compileBundle
   :: LatexEnvironment
@@ -305,23 +331,32 @@ compilePdfBundle environment runner paths bundle source candidateOutput = do
             }
         ]
 
-inspectLatexEnvironment :: IO (Either [Diagnostic] LatexEnvironment)
-inspectLatexEnvironment = inspectLatexEnvironmentWith findExecutable readProcessWithExitCode
+inspectLatexEnvironment :: PdfEngine -> IO (Either [Diagnostic] LatexEnvironment)
+inspectLatexEnvironment engine = inspectLatexEnvironmentWith engine findExecutable readProcessWithExitCode
 
 inspectLatexEnvironmentWith
-  :: (String -> IO (Maybe FilePath))
+  :: PdfEngine
+  -> (String -> IO (Maybe FilePath))
   -> (FilePath -> [String] -> String -> IO (ExitCode, String, String))
   -> IO (Either [Diagnostic] LatexEnvironment)
-inspectLatexEnvironmentWith finder commandRunner = do
+inspectLatexEnvironmentWith selectedEngine finder commandRunner = do
   latexmk <- finder "latexmk"
-  engine <- finder "pdflatex"
+  let engineName = Text.unpack (renderPdfEngine selectedEngine)
+      engineCode = renderPdfEngine selectedEngine
+  engine <- finder engineName
   let missing =
         [ missingTool "latex.latexmk-missing" "latexmk" | latexmk == Nothing ]
-          <> [missingTool "latex.pdflatex-missing" "pdflatex" | engine == Nothing]
+          <> [missingTool ("latex." <> engineCode <> "-missing") engineCode | engine == Nothing]
   case (missing, latexmk, engine) of
     ([], Just latexmkPath, Just enginePath) -> do
       latexmkResult <- probeVersion commandRunner "latex.latexmk-unusable" "Latexmk" latexmkPath ["--version"]
-      engineResult <- probeVersion commandRunner "latex.pdflatex-unusable" "pdfTeX" enginePath ["--version"]
+      engineResult <-
+        probeVersion
+          commandRunner
+          ("latex." <> engineCode <> "-unusable")
+          (engineVersionMarker selectedEngine)
+          enginePath
+          ["--version"]
       pure $
         case (latexmkResult, engineResult) of
           (Right latexmkText, Right engineText) ->
@@ -329,15 +364,16 @@ inspectLatexEnvironmentWith finder commandRunner = do
               LatexEnvironment
                 { latexmkExecutable = latexmkPath
                 , latexmkVersion = latexmkText
+                , latexEngine = selectedEngine
                 , latexEngineExecutable = enginePath
                 , latexEngineVersion = engineText
                 }
           _ -> Left ([problem | Left problem <- [latexmkResult]] <> [problem | Left problem <- [engineResult]])
     _ -> pure (Left missing)
 
-diagnoseLatexEnvironment :: IO (Either [Diagnostic] LatexEnvironment)
-diagnoseLatexEnvironment = do
-  inspected <- inspectLatexEnvironment
+diagnoseLatexEnvironment :: PdfEngine -> IO (Either [Diagnostic] LatexEnvironment)
+diagnoseLatexEnvironment engine = do
+  inspected <- inspectLatexEnvironment engine
   case inspected of
     Left problems -> pure (Left problems)
     Right environment -> probeLatexEnvironmentWith runLatexmk environment
@@ -373,7 +409,12 @@ probeLatexEnvironmentWith runner environment =
                   "latex.probe-failed"
                   ("latexmk could not compile a minimal document (exit " <> Text.pack (show code) <> ")" <> processSummary result)
               )
-                { diagnosticHint = Just "Check the TeX distribution, latexmk Perl runtime, and pdflatex package installation."
+                { diagnosticHint =
+                    Just
+                      ( "Check the TeX distribution, latexmk Perl runtime, and "
+                          <> renderPdfEngine (latexEngine environment)
+                          <> " package installation."
+                      )
                 }
             ]
 
@@ -381,14 +422,10 @@ runLatexmk :: LatexRunner
 runLatexmk environment invocation = do
   inherited <- getEnvironment
   let arguments =
-        [ "-pdf"
-        , "-interaction=nonstopmode"
-        , "-halt-on-error"
-        , "-file-line-error"
-        , "-recorder"
-        , "-outdir=" <> invocationOutputDirectory invocation
-        , invocationSourcePath invocation
-        ]
+        latexmkRecipeOptions (latexEngine environment)
+          <> [ "-outdir=" <> invocationOutputDirectory invocation
+             , invocationSourcePath invocation
+             ]
       process =
         (proc (latexmkExecutable environment) arguments)
           { cwd = Just (invocationWorkingDirectory invocation)
@@ -400,6 +437,26 @@ runLatexmk environment invocation = do
       Left exception -> LatexRunResult (ExitFailure 127) "" (Text.pack $ show exception)
       Right (exitCode, stdoutText, stderrText) ->
         LatexRunResult exitCode (Text.pack stdoutText) (Text.pack stderrText)
+
+latexmkEngineArgument :: PdfEngine -> String
+latexmkEngineArgument PdfLaTeX = "-pdf"
+latexmkEngineArgument XeLaTeX = "-xelatex"
+latexmkEngineArgument LuaLaTeX = "-lualatex"
+
+latexmkRecipeOptions :: PdfEngine -> [String]
+latexmkRecipeOptions engine =
+  [ "-norc"
+  , latexmkEngineArgument engine
+  , "-interaction=nonstopmode"
+  , "-halt-on-error"
+  , "-file-line-error"
+  , "-recorder"
+  ]
+
+engineVersionMarker :: PdfEngine -> Text
+engineVersionMarker PdfLaTeX = "pdfTeX"
+engineVersionMarker XeLaTeX = "XeTeX"
+engineVersionMarker LuaLaTeX = "Lua"
 
 probeVersion
   :: (FilePath -> [String] -> String -> IO (ExitCode, String, String))
@@ -494,9 +551,11 @@ pdfInputFingerprint environment paths bundle source generatedAst = do
   let payload =
         encode $
           object
-            [ "recipe" .= ("latexmk-pdf-v2-pandoc-blocks" :: Text)
+            [ "recipe" .= ("latexmk-pdf-v3-engine-selection" :: Text)
             , "latexmk" .= latexmkVersion environment
-            , "engine" .= latexEngineVersion environment
+            , "engine" .= renderPdfEngine (latexEngine environment)
+            , "engine_version" .= latexEngineVersion environment
+            , "latexmk_options" .= map Text.pack (latexmkRecipeOptions $ latexEngine environment)
             , "source" .= source
             , "generated_ast" .= generatedAst
             , "shared_latex" .= sharedLatex

@@ -31,7 +31,7 @@ assembled LaTeX + in-process lowering of direct Pandoc blocks
        input fingerprint + PDF cache
                   |
                   v
-structured latexmk -pdf invocation per changed bundle
+structured latexmk invocation with the configured engine per changed bundle
                   |
                   v
         .tex2ss/work/pdfs candidate
@@ -48,7 +48,8 @@ structured latexmk -pdf invocation per changed bundle
 - Generator output is explicit block-level `deferred_latex` or
   `pandoc_blocks`; ordinary strings have no implicit reader or target format.
 - Hakyll owns tracked inputs, incremental compilation, templates, and routes.
-- `latexmk`/`pdflatex` own TeX execution for the single M2 PDF recipe.
+- `latexmk` and the selected `pdflatex`/`xelatex`/`lualatex` executable own TeX
+  execution for the single M2 PDF recipe.
 - tex2ss owns validation, paths, build planning, media routing, structured
   process arguments, PDF fingerprints, and both final snapshot transactions.
 
@@ -74,16 +75,22 @@ basename (`index.pdf`, `guide/guide.pdf`); bundle metadata may override only the
 basename with `pdf_name`. Direct generated blocks are lowered by the linked
 Pandoc LaTeX writer, and required Pandoc snippet helper macros are inserted
 before `\\begin{document}`. Each fingerprint contains
-the lowered assembled source, canonical generated AST, TeX recipe/tool versions,
+the lowered assembled source, canonical generated AST, selected engine name,
+engine/latexmk versions, fixed recipe options,
 shared `latex/`, bundle `media/`, and bundle-local `extension/latex/` manifests.
 An unchanged and unmodified published PDF is copied into a fresh candidate
 without invoking TeX.
 Every changed bundle compiles in `.tex2ss/tmp/pdf/`; only a complete candidate
 can atomically replace `pdfs/`.
 
-`doctor` resolves `latexmk` and `pdflatex`, reports their paths and versions,
-and runs the same recipe on a minimal document. Finding commands on `PATH` alone
-is therefore not considered a healthy LaTeX environment.
+The fixed recipe passes `-norc`, so host or project `.latexmkrc` files cannot
+change the selected engine or command underneath the recorded fingerprint.
+
+`doctor` reads the strict config before probing TeX. It resolves `latexmk` and
+only the selected `pdflatex`, `xelatex`, or `lualatex`, reports their paths and
+versions, and runs the same recipe on a minimal document. The other two engines
+need not be installed. Finding commands on `PATH` alone is therefore not
+considered a healthy LaTeX environment.
 
 ## Trusted Lua
 

@@ -11,7 +11,9 @@ import Test.Tasty.HUnit ((@?=), assertBool, testCase)
 import Tex2ss.Config (loadBundleMetadata, loadSiteConfig)
 import Tex2ss.Types
   ( BundleMetadata (metadataGenerator, metadataPdfName)
+  , PdfEngine (..)
   , PdfName (PdfName)
+  , SiteConfig (configPdfEngine)
   )
 
 tests :: TestTree
@@ -24,6 +26,23 @@ tests =
           ByteString.writeFile path validConfig
           result <- loadSiteConfig path
           assertBool "expected valid config" (either (const False) (const True) result)
+          fmap configPdfEngine result @?= Right PdfLaTeX
+    , testCase "accepts each supported PDF engine" $
+        withSystemTempDirectory "tex2ss-config" $ \root -> do
+          let path = root </> "config.json"
+          forM_
+            [("pdflatex", PdfLaTeX), ("xelatex", XeLaTeX), ("lualatex", LuaLaTeX)]
+            $ \(name, expected) -> do
+              ByteString.writeFile path (configWithPdfEngine name)
+              result <- loadSiteConfig path
+              fmap configPdfEngine result @?= Right expected
+    , testCase "rejects unsupported or non-string PDF engines" $
+        withSystemTempDirectory "tex2ss-config" $ \root -> do
+          let path = root </> "config.json"
+          forM_ ["\"latex\"", "\"XeLaTeX\"", "{}", "[]", "null"] $ \value -> do
+            ByteString.writeFile path (configWithRawPdfEngine value)
+            result <- loadSiteConfig path
+            assertBool ("expected invalid pdf_engine: " <> value) (either (const True) (const False) result)
     , testCase "rejects unknown top-level keys" $
         withSystemTempDirectory "tex2ss-config" $ \root -> do
           let path = root </> "config.json"
@@ -62,3 +81,13 @@ tests =
 validConfig :: ByteString.ByteString
 validConfig =
   "{\"schema_version\":1,\"site\":{\"title\":\"Example\"},\"templates\":{\"default\":\"default.html\"},\"default_template\":\"default\",\"filters\":[]}"
+
+configWithPdfEngine :: String -> ByteString.ByteString
+configWithPdfEngine name = configWithRawPdfEngine ("\"" <> name <> "\"")
+
+configWithRawPdfEngine :: String -> ByteString.ByteString
+configWithRawPdfEngine value =
+  ByteString.pack $
+    "{\"schema_version\":1,\"site\":{\"title\":\"Example\"},\"templates\":{\"default\":\"default.html\"},\"default_template\":\"default\",\"filters\":[],\"pdf_engine\":"
+      <> value
+      <> "}"

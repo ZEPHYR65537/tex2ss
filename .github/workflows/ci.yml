@@ -23,3 +23,26 @@ jobs:
       - run: cabal update
       - run: cabal build all
       - run: cabal test all
+
+  pdf-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: 9.10.3
+          cabal-version: 3.16.1.0
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y latexmk texlive-latex-base
+      - run: cabal update
+      - run: cabal build exe:tex2ss
+      - name: Run real pdfLaTeX doctor and build
+        shell: bash
+        run: |
+          exe="$(cabal list-bin exe:tex2ss)"
+          site="$RUNNER_TEMP/tex2ss-pdf-smoke"
+          "$exe" init "$site"
+          "$exe" doctor "$site"
+          cd "$site"
+          "$exe" build --format pdf
+          test -f pdfs/index.pdf

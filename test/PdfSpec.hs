@@ -14,14 +14,17 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit ((@?=), assertBool, testCase)
 import Tex2ss.Diagnostics (Diagnostic (diagnosticCode, diagnosticMessage))
 import Tex2ss.Pdf
-  ( LatexEnvironment (LatexEnvironment)
+  ( LatexEnvironment (..)
   , LatexInvocation (..)
   , LatexRunResult (LatexRunResult)
   , buildPdfWith
   , inspectLatexEnvironmentWith
+  , latexmkEngineArgument
+  , latexmkRecipeOptions
   , probeLatexEnvironmentWith
   )
 import Tex2ss.Scaffold (initializeProject)
+import Tex2ss.Types (PdfEngine (..), renderPdfEngine)
 
 tests :: TestTree
 tests =
@@ -105,13 +108,76 @@ tests =
                 (any ("Undefined control sequence" `Text.isInfixOf`) $ map diagnosticMessage problems)
             Right _ -> assertBool "expected PDF failure" False
           ByteString.readFile output >>= (@?= previous)
-    , testCase "reports both missing LaTeX executables" $ do
+    , testCase "maps each supported engine to one fixed latexmk mode" $ do
+        latexmkEngineArgument PdfLaTeX @?= "-pdf"
+        latexmkEngineArgument XeLaTeX @?= "-xelatex"
+        latexmkEngineArgument LuaLaTeX @?= "-lualatex"
+        latexmkRecipeOptions PdfLaTeX
+          @?= [ "-norc"
+              , "-pdf"
+              , "-interaction=nonstopmode"
+              , "-halt-on-error"
+              , "-file-line-error"
+              , "-recorder"
+              ]
+    , testCase "reports latexmk and only the selected missing engine" $ do
         let neverRuns _ _ _ = error "version runner should not be called"
-        result <- inspectLatexEnvironmentWith (const $ pure Nothing) neverRuns
+        result <- inspectLatexEnvironmentWith XeLaTeX (const $ pure Nothing) neverRuns
         case result of
           Left problems ->
-            map diagnosticCode problems @?= ["latex.latexmk-missing", "latex.pdflatex-missing"]
+            map diagnosticCode problems @?= ["latex.latexmk-missing", "latex.xelatex-missing"]
           Right _ -> assertBool "expected missing tool diagnostics" False
+    , testCase "discovers and probes only the configured engine" $ do
+        lookups <- newIORef ([] :: [String])
+        let finder name = do
+              modifyIORef' lookups (<> [name])
+              pure (Just $ "fake-" <> name)
+            versionRunner executable _ _ =
+              pure
+                ( ExitSuccess
+                , if executable == "fake-latexmk" then "Latexmk 1.0" else "LuaHBTeX 1.0"
+                , ""
+                )
+        result <- inspectLatexEnvironmentWith LuaLaTeX finder versionRunner
+        readIORef lookups >>= (@?= ["latexmk", "lualatex"])
+        case result of
+          Left _ -> assertBool "expected usable selected engine" False
+          Right environment -> do
+            latexEngine environment @?= LuaLaTeX
+            latexEngineExecutable environment @?= "fake-lualatex"
+    , testCase "rejects a build environment that disagrees with config" $
+        withSystemTempDirectory "tex2ss-pdf" $ \root -> do
+          initializeFixture root
+          let neverRuns _ _ = error "runner must not execute after an engine mismatch"
+          result <- buildPdfWith (fakeEnvironmentFor XeLaTeX "XeTeX 1.0") neverRuns root False
+          case result of
+            Left problems -> map diagnosticCode problems @?= ["pdf.engine-mismatch"]
+            Right _ -> assertBool "expected engine mismatch" False
+    , testCase "switching the configured engine invalidates the PDF cache" $
+        withSystemTempDirectory "tex2ss-pdf" $ \root -> do
+          initializeFixture root
+          invocations <- newIORef (0 :: Int)
+          let runner _ invocation = do
+                modifyIORef' invocations (+ 1)
+                createDirectoryIfMissing True (invocationOutputDirectory invocation)
+                ByteString.writeFile (invocationExpectedPdf invocation) "%PDF-engine"
+                pure (LatexRunResult ExitSuccess "" "")
+          buildPdfWith fakeEnvironment runner root False >>= (@?= Right True)
+          writeSiteConfig root "xelatex"
+          buildPdfWith (fakeEnvironmentFor XeLaTeX "XeTeX 1.0") runner root False >>= (@?= Right False)
+          readIORef invocations >>= (@?= 2)
+    , testCase "changing the selected engine version invalidates the PDF cache" $
+        withSystemTempDirectory "tex2ss-pdf" $ \root -> do
+          initializeFixture root
+          invocations <- newIORef (0 :: Int)
+          let runner _ invocation = do
+                modifyIORef' invocations (+ 1)
+                createDirectoryIfMissing True (invocationOutputDirectory invocation)
+                ByteString.writeFile (invocationExpectedPdf invocation) "%PDF-version"
+                pure (LatexRunResult ExitSuccess "" "")
+          buildPdfWith fakeEnvironment runner root False >>= (@?= Right True)
+          buildPdfWith (fakeEnvironmentFor PdfLaTeX "pdfTeX 2.0") runner root False >>= (@?= Right False)
+          readIORef invocations >>= (@?= 2)
     , testCase "requires the doctor compile probe to produce a PDF" $ do
         let noOutput _ _ = pure (LatexRunResult ExitSuccess "" "")
         result <- probeLatexEnvironmentWith noOutput fakeEnvironment
@@ -157,9 +223,25 @@ enableSemanticGenerator root = do
     )
 
 fakeEnvironment :: LatexEnvironment
-fakeEnvironment =
+fakeEnvironment = fakeEnvironmentFor PdfLaTeX "pdfTeX 1.0"
+
+fakeEnvironmentFor :: PdfEngine -> Text.Text -> LatexEnvironment
+fakeEnvironmentFor engine version =
   LatexEnvironment
-    "fake-latexmk"
-    "Latexmk 1.0"
-    "fake-pdflatex"
-    "pdfTeX 1.0"
+    { latexmkExecutable = "fake-latexmk"
+    , latexmkVersion = "Latexmk 1.0"
+    , latexEngine = engine
+    , latexEngineExecutable = "fake-" <> Text.unpack (renderPdfEngine engine)
+    , latexEngineVersion = version
+    }
+
+writeSiteConfig :: FilePath -> Text.Text -> IO ()
+writeSiteConfig root engine =
+  TextIO.writeFile
+    (root </> "config.json")
+    ( "{\"schema_version\":1,\"site\":{\"title\":\"PDF fixture\"},"
+        <> "\"templates\":{\"default\":\"default.html\"},\"default_template\":\"default\","
+        <> "\"filters\":[],\"pdf_engine\":\""
+        <> engine
+        <> "\"}"
+    )

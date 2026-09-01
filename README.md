@@ -29,8 +29,11 @@ tex2ss build [--format html|pdf] [--include-drafts]
 tex2ss serve [--host 127.0.0.1] [--port 8000] [--include-drafts]
 ```
 
-`doctor` validates the project, reports the resolved `latexmk` and `pdflatex`
-versions and paths, and compiles a minimal probe document. PDF builds publish
+`doctor` validates the project, reports the resolved `latexmk` and configured
+PDF engine versions and paths, and compiles a minimal probe document with that
+same recipe. The optional root `pdf_engine` field selects `pdflatex` (the
+default), `xelatex`, or `lualatex`; tex2ss keeps the remaining structured
+`latexmk` arguments fixed. PDF builds publish
 slot-shaped, recognizable files such as `pdfs/index.pdf` and
 `pdfs/guide/guide.pdf` only after the complete candidate succeeds. A bundle can
 override its basename with the optional `meta.json` field `pdf_name`.
@@ -40,7 +43,7 @@ returns named block fragments. A fragment explicitly contains either deferred
 LaTeX or portable `pandoc.Blocks`: HTML inserts direct blocks before filters,
 while PDF lowers the same AST with the linked Pandoc LaTeX writer. Neither path
 starts a Pandoc CLI process. The experiment does not expose analyzers, virtual
-bundles, deployment, multiple PDF recipes, or selective-build APIs.
+bundles, deployment, arbitrary or multiple PDF recipes, or selective-build APIs.
 
 See [the architecture](docs/architecture.md), [schema v1](docs/schemas.md), and
 [the explicit M1 boundary](docs/m1-scope.md) for implementation contracts.

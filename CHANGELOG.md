@@ -13,3 +13,6 @@
   cache fingerprints.
 - Name non-root PDFs after the final slot segment by default and support a
   strict bundle-level `pdf_name` basename override.
+- Add the concise root `pdf_engine` enum for pdfLaTeX, XeLaTeX, or LuaLaTeX;
+  use the selected engine in the structured recipe, doctor probe, diagnostics,
+  and cache fingerprint.

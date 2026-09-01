@@ -17,6 +17,7 @@ import Tex2ss.SiteIndex (buildSiteIndex)
 import Tex2ss.Types
   ( Bundle (..)
   , BundleMetadata (..)
+  , PdfEngine (PdfLaTeX)
   , SiteConfig (..)
   , SiteSettings (..)
   , Slot (..)
@@ -84,6 +85,7 @@ fixture root = do
           (Map.singleton "default" "default.html")
           "default"
           ["filters/test.lua"]
+          PdfLaTeX
       metadata = BundleMetadata 1 "Page" Nothing Nothing Nothing Published Nothing [] Map.empty Nothing
       bundle = Bundle (Slot []) bundleDirectory indexPath metaPath metadata
   pure (config, bundle, filterPath)
