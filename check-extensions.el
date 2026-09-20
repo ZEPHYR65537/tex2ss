@@ -3,6 +3,7 @@
 ;; Runs the outer script pipeline, a .cfg mapping, an explicit .mk4 file,
 ;; a native Lua filter, and the built-in inlinecss extension together.
 ;;; Code:
+(setq load-prefer-newer t)
 (require 'static-site)
 
 (let* ((package-root (file-name-directory load-file-name))

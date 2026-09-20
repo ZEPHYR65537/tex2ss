@@ -1,8 +1,8 @@
 # static-site.el
 
-A general-purpose Emacs package for building, previewing and publishing static-file projects. It works with make4ht alone, make4ht followed by Astro, or other generators. It has no dependency on the author's blog, Node.js, Astro, or a particular layout. The two blog candidates carry identical copies of the package plus a small blog adapter.
+A general-purpose Emacs package for building, previewing and publishing static-file projects. It works with make4ht alone, make4ht followed by any frontend framework, or other generators. The package is maintained in its own repository. Both blog candidates use this shared installation and carry only their own adapter; neither bundles another copy of the package.
 
-This is version 0.1.0, tested locally with Emacs 31.1 on Windows. The declared minimum is Emacs 28.1; other Emacs/OS combinations still need testing. It is not a claim of production-proven reliability.
+This is version 0.2.0, tested locally with Emacs 31.1 on Windows. The declared minimum is Emacs 28.1; other Emacs/OS combinations still need testing. It is not a claim of production-proven reliability.
 
 ## Install
 
@@ -13,7 +13,7 @@ Put this directory on `load-path` in your own Emacs configuration:
 (require 'static-site)
 ```
 
-On Windows use forward slashes, for example `D:/tools/emacs-static-site`. No installation changes your Emacs configuration automatically. The only required package is this single `static-site.el` file; tests and examples are optional.
+On Windows use forward slashes, for example `D:/tools/static_site`. Keep the three runtime modules together: `static-site.el`, `static-site-preview.el`, and `static-site-author.el`. Tests and examples are optional. There are no third-party Emacs dependencies. The preview server and build executables are chosen by the project; Node.js and Astro are not package requirements.
 
 For a Purcell-style configuration using local `pkg/` packages, place this
 directory at `~/.emacs.d/pkg/static_site/`, copy
@@ -34,8 +34,17 @@ Enable `M-x static-site-mode` in project buffers for these keys:
 | `C-c s d` | Build, validate, snapshot and preview deployment |
 | `C-c s p` | Confirm publication of the reviewed snapshot |
 | `C-c s k` | Cancel this project's active job |
+| `C-c s n` / `C-c s i` | New article / insert a project template |
 
 All commands are also available through `M-x`. Diagnostic buffers have the project root in their names. Jobs and deployment plans are separate for each project, so independent projects can run concurrently. Load project configuration with normal Emacs directory-local variables; these command settings are intentionally not marked automatically safe.
+
+## Project management and isolation
+
+The Purcell loader adds `C-c p C-s` to Projectile's existing command prefix, and `C-x p C-s` to built-in project.el. These show the same site commands for the current project. Projectile remains responsible for project switching, file discovery and searching; the package does not maintain another project index or scan the source tree on each keystroke.
+
+Root resolution uses an explicit buffer/directory-local `static-site-root`, then the closest explicitly registered adapter root, then Projectile when available, then project.el, then a directory-local configuration or the current directory. A `.projectile` marker can identify a non-Git project. `static-site-root` can identify a nested site in a larger repository. Roots are canonicalized, so symlink aliases share one job lock.
+
+Use `.dir-locals.el` to share settings across buffers and sessions. A trusted adapter may instead call `(static-site-register-project ROOT SETTINGS)`, where SETTINGS is an alist of `static-site-*` variables. Registration stores defaults under that root; it never changes global defaults. Explicit directory/buffer locals take precedence. Loading two adapters in either order leaves each checkout's root, backend, output, environment, preview and deployment state independent. A single root has one job lock; stop its watching preview before changing build profiles or writing to the same output.
 
 ## Direct make4ht usage
 
@@ -80,7 +89,9 @@ A plugin is an ordinary executable script plus its arguments. The minimal extens
               ("catalog" "node" "scripts/catalog.mjs")))
 ```
 
-These scripts run before `static-site-build-command`; `static-site-verify-command`, if set, runs afterward. A nonzero exit stops all later steps, including deployment. Commands receive the project root as their working directory. There is no shell string interpolation. To use a shell pipeline, explicitly run your own script with its interpreter.
+Execution order is `static-site-generators`, `static-site-build-command`, `static-site-post-build-generators`, then `static-site-verify-command`. A nonzero exit stops all later steps, including deployment. A nil build command allows a static-files-only project. Commands use `static-site-build-directory`, relative to the root (default `.`). There is no shell string interpolation. To use a shell pipeline or different working directories per step, explicitly run your own orchestration script.
+
+`static-site-environment` is an alist of environment overrides such as `(("TEXINPUTS" . "tex//;"))`; nil values unset variables. Keep the platform's TeX search-path separator and empty default-search entry as appropriate. `static-site-exec-path` prepends project-relative executable directories to both PATH and Emacs's search path. The complete effective environment and executable path are captured before launching a job, preserved across all asynchronous steps and callbacks, and retained for the reviewed deployment. Temporary `let` bindings therefore survive the first child process exiting. Environment values are not logged.
 
 Scripts decide their inputs, outputs, caches, asset management and dependencies. There is no registration service, plugin discovery, dependency solver, special serialization format, or enforced template system. Do not put passwords or private key contents in command arguments: commands are shown in the diagnostics buffer.
 
@@ -99,6 +110,34 @@ For example, make4ht can generate content first and Astro can build the final si
 ```
 
 The named scripts in this example are yours to implement. An Astro dev server alone does not necessarily rerun a TeX generator; make that behavior part of your preview script if needed. You may instead put the complete pipeline into one script. The blog adapters demonstrate that approach.
+
+Migrating to a different frontend changes these commands, directories and possibly the generated content format expected by that frontend. It does not require a framework plugin in Emacs. Native make4ht `.cfg`, `.mk4`, filters and named extensions remain within make4ht's supported extension mechanisms; the outer script list is not a replacement for them. See the [make4ht build-file and extension manual](https://www.kodymirus.cz/make4ht/make4ht-doc.html).
+
+## Preview readiness and ownership
+
+Browser/EWW commands start a managed preview if needed, then open it only after readiness. `static-site-preview-directory` selects its working directory. HTTP requests are asynchronous, bounded by a per-request timeout, and never overlap within a session. Only loopback HTTP is accepted. Startup checks for an occupied port before launching a process. A plain Python/framework server needs only a successful HTTP response after that check; this confirms availability but cannot prove its backend identity. The package never silently adopts an existing plain server.
+
+For stronger identity checks and automatic EWW refresh, configure `static-site-preview-status-path` and `static-site-preview-status-function`. The decoder takes the HTTP body and returns a plist:
+
+```elisp
+(:root "/absolute/project/root" :backend "project-target"
+ :token "echo-the-STATIC_SITE_PREVIEW_TOKEN-environment-variable"
+ :ready t :building nil :revision 12 :error nil)
+```
+
+The package checks root, backend and the owned process's instance token before opening or refreshing content. `:revision` changes only after a successful rebuild; `:error` carries build diagnostics. The token distinguishes local instances; it is not remote authentication. The decoder is a small optional adapter, not a required protocol for ordinary static servers.
+
+Use `M-x static-site-preview-follow` to explicitly follow an external server. This requires an identity decoder and checks its root/backend. Stopping a followed session cancels its polling without killing the external process. Stopping an owned session cancels pending requests and queued opens, and terminates only that process tree. Changed preview commands, environments or targets require a stop/restart. `M-x static-site-preview-status` shows the current project's status and diagnostics.
+
+The status header and diagnostics expose failed builds; EWW keeps its last successful content until recovery. Only that project's EWW buffer refreshes after a successful revision. The preview command owns file watching and graphical live reload. Generic servers cannot report build failures or revisions without the optional decoder. Independent editors and arbitrary external builders still need their own cross-process coordination.
+
+## Authoring and source errors
+
+`static-site-mode` enables the optional `static-site-author-mode` without replacing AUCTeX/LaTeX or another major mode. Use normal completion-at-point (`M-TAB`) for configured metadata keys and enum values. Set `static-site-metadata-command` to a TeX command name without its backslash, and `static-site-metadata-keys` to an alist such as `(("title") ("visibility" "draft" "published"))`. Completion runs only inside that braced declaration and examines at most 20,000 characters; project parsers still validate the metadata.
+
+Templates are an alist in `static-site-templates`. A value is literal text containing one `{{point}}` cursor marker, or an Elisp function that inserts content and optionally prompts. General defaults include a plain TeX article and an image reference. Adapters can add widgets and audio/video macros supported by their own LaTeX package. New articles open as editable, unsaved buffers; existing files and modified article buffers are protected from overwrite.
+
+Diagnostics use Emacs compilation-mode: `M-g n`/`next-error` and RET on an error open the source. Direct make4ht error tables are recognized. A staging pipeline should preserve source lines and emit `original/path.tex:LINE: error: MESSAGE`; set `static-site-error-regexp-alist` to `(gnu)` to avoid navigating duplicate raw staging errors. The two blog pipelines preserve metadata line counts and emit original paths, including filenames with spaces.
 
 ## SSH deployment
 
@@ -148,8 +187,9 @@ This is file synchronization, **not an atomic whole-site release or rollback sys
 ## Checks
 
 ```text
-emacs --batch -Q -L . -f batch-byte-compile static-site.el
+emacs --batch -Q -L . -f batch-byte-compile static-site.el static-site-preview.el static-site-author.el
 emacs --batch -Q -L . -l static-site-tests.el
+emacs --batch -Q -L . -l check-workflow.el
 emacs --batch -Q -L . -l check-make4ht.el
 emacs --batch -Q -L . -l check-extensions.el
 ```
@@ -161,19 +201,19 @@ The offline tests exercise actual asynchronous child processes, failure/cancella
 The installed `~/.emacs.d/pkg/static_site/` directory is an independent Git
 repository. The surrounding Emacs configuration ignores this directory and
 retains only its `lisp/init-static-site.el` loader and the corresponding
-`init-local.el` entry. Work on the package in this checkout; workspace copies
-and the two blog adapters are snapshots and are not synchronized automatically.
+`init-local.el` entry. Work on the package in this checkout. The two blog
+repositories own their adapters and build scripts, and load this shared package.
 
 The local branch is `static-site`. Its `origin` is
-`https://github.com/ZEPHYR65537/tex2ss.git`, reserved for later publication to a
-new branch. This package has an independent initial history; it was not based
-on tex2ss's existing branches. No upstream tracking branch is configured yet.
+`https://github.com/ZEPHYR65537/tex2ss.git`, using the separate `static-site`
+branch. This package has an independent initial history;
+it was not based on tex2ss's other branches.
 
-When ready, choose an unused remote branch name and push explicitly:
+The package branch can be pushed explicitly:
 
 ```sh
-git push -u origin HEAD:refs/heads/YOUR_NEW_BRANCH
+git push -u origin static-site
 ```
 
-Replace `YOUR_NEW_BRANCH` with the chosen name. Keep package changes separate
-from commits in the parent Emacs configuration repository.
+Keep package changes separate from commits in the parent Emacs configuration
+repository and from project-specific build scripts in the two blog repositories.

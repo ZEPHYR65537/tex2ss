@@ -1,6 +1,6 @@
 ;;; static-site.el --- Build, preview and publish static sites -*- lexical-binding: t; -*-
 
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, web
 
@@ -17,6 +17,18 @@
 (require 'subr-x)
 (require 'eww)
 (require 'browse-url)
+(require 'ansi-color)
+
+(declare-function projectile-project-root "projectile")
+(defvar projectile-require-project-root)
+(defvar static-site-mode-map)
+(declare-function static-site-preview-start "static-site-preview")
+(declare-function static-site-preview-stop "static-site-preview")
+(declare-function static-site-preview-browser "static-site-preview")
+(declare-function static-site-preview-eww "static-site-preview")
+(declare-function static-site-author-mode "static-site-author")
+(declare-function static-site-insert-template "static-site-author")
+(declare-function static-site-new-article "static-site-author")
 
 (defgroup static-site nil "Build and publish static websites." :group 'tools)
 (defcustom static-site-root nil
@@ -25,6 +37,28 @@
 (defcustom static-site-build-command nil
   "Build program and arguments.  For example: (\"node\" \"build.mjs\")."
   :type '(repeat string))
+(defcustom static-site-backend "static"
+  "Project-defined build target identifier, also checked by preview adapters."
+  :type 'string)
+(defcustom static-site-error-regexp-alist nil
+  "Optional project-specific `compilation-error-regexp-alist'.
+Nil uses standard compiler diagnostics plus make4ht's native error table.
+A staging adapter that emits mapped GNU diagnostics can use (gnu)."
+  :type '(choice (const nil) (repeat sexp)))
+(defcustom static-site-build-directory "."
+  "Working directory for build scripts, relative to the project root."
+  :type 'directory)
+(defcustom static-site-environment nil
+  "Project environment overrides as (NAME . VALUE) pairs.
+Nil VALUE unsets a variable.  Values are not printed in diagnostics.
+The environment and executable search path are captured for the whole job."
+  :type '(alist :key-type string :value-type (choice string (const nil))))
+(defcustom static-site-exec-path nil
+  "Extra executable directories, relative to the root, prepended to PATH."
+  :type '(repeat directory))
+(defcustom static-site-post-build-generators nil
+  "Ordered (NAME PROGRAM ARGUMENT...) scripts after the build, before validation."
+  :type '(repeat (cons string (repeat string))))
 (defcustom static-site-generators nil
   "Ordered script plugins, each (NAME PROGRAM ARGUMENT...).
 They run in the project root before the build.  A nonzero exit stops
@@ -88,6 +122,9 @@ known hosts and jump hosts there, never passwords or private key contents."
   :type '(choice (const nil) file))
 
 (dolist (variable '(static-site-root static-site-build-command static-site-generators
+                    static-site-backend static-site-build-directory
+                    static-site-error-regexp-alist
+                    static-site-environment static-site-exec-path static-site-post-build-generators
                     static-site-verify-command static-site-public-directory
                     static-site-entry-file static-site-make4ht-program static-site-make4ht-options
                     static-site-make4ht-tex4ht-options
@@ -99,13 +136,69 @@ known hosts and jump hosts there, never passwords or private key contents."
   (make-variable-buffer-local variable))
 
 (cl-defstruct (static-site--state (:constructor static-site--make-state))
-  root process server watches plan)
+  root process server watches plan preview)
 (defvar static-site--states (make-hash-table :test #'equal))
+(defvar static-site--projects (make-hash-table :test #'equal)
+  "Explicit adapter settings indexed by canonical project root.")
+(defvar-local static-site--applied-settings nil)
+
+(defun static-site-register-project (root settings)
+  "Register trusted adapter SETTINGS for ROOT without changing global defaults.
+SETTINGS is an alist of static-site variables.  Directory/buffer locals take
+precedence.  Loading another adapter never changes an existing project's jobs."
+  (dolist (setting settings)
+    (unless (and (consp setting) (symbolp (car setting))
+                 (string-prefix-p "static-site-" (symbol-name (car setting))))
+      (error "Invalid static-site setting: %S" setting)))
+  (puthash (file-name-as-directory (file-truename root)) (copy-tree settings)
+           static-site--projects))
+
+(defun static-site--detected-root ()
+  "Ask the user's project manager, then fall back to directory locals."
+  (or (when (fboundp 'projectile-project-root)
+        (let ((projectile-require-project-root nil))
+          (projectile-project-root)))
+      (when-let* ((project (project-current nil))) (project-root project))
+      (locate-dominating-file default-directory ".dir-locals.el")))
+
+(defun static-site--registered-root ()
+  "Find the most specific registered project containing the current file."
+  (let ((directory (file-name-as-directory
+                    (file-truename (if buffer-file-name
+                                       (file-name-directory buffer-file-name)
+                                     default-directory))))
+        found)
+    (maphash (lambda (root _settings)
+               (when (and (string-prefix-p root directory
+                                           (eq system-type 'windows-nt))
+                          (or (null found) (> (length root) (length found))))
+                 (setq found root)))
+             static-site--projects)
+    found))
+
+(defun static-site--configure ()
+  "Apply this project's adapter defaults, respecting explicit local settings."
+  (let ((settings (gethash (static-site--root) static-site--projects)))
+    (dolist (setting static-site--applied-settings)
+      (when (and (not (assq (car setting) settings))
+                 (equal (symbol-value (car setting)) (cdr setting)))
+        (kill-local-variable (car setting))))
+    (setq static-site--applied-settings
+          (delq nil
+                (mapcar
+                 (lambda (setting)
+                   (let* ((variable (car setting))
+                          (previous (assq variable static-site--applied-settings)))
+                     (when (or (not (local-variable-p variable))
+                               (and previous (equal (symbol-value variable) (cdr previous))))
+                       (set (make-local-variable variable) (copy-tree (cdr setting)))
+                       (cons variable (copy-tree (cdr setting)))))) settings)))))
 
 (defun static-site--root ()
   "Return the canonical local project root."
   (let ((root (or static-site-root
-                  (when-let* ((project (project-current nil))) (project-root project))
+                  (static-site--registered-root)
+                  (static-site--detected-root)
                   default-directory)))
     (when (file-remote-p root) (user-error "Use a local checkout to build and publish"))
     (unless (file-directory-p root) (user-error "Project root does not exist: %s" root))
@@ -113,6 +206,7 @@ known hosts and jump hosts there, never passwords or private key contents."
 
 (defun static-site--state ()
   "Return this project's independent job state."
+  (static-site--configure)
   (let ((root (static-site--root)))
     (or (gethash root static-site--states)
         (puthash root (static-site--make-state :root root) static-site--states))))
@@ -122,7 +216,9 @@ known hosts and jump hosts there, never passwords or private key contents."
   (when (process-live-p (static-site--state-process state))
     (user-error "A site job is already running; use M-x static-site-cancel"))
   (when (and building (static-site--state-watches state)
-             (process-live-p (static-site--state-server state)))
+             (or (process-live-p (static-site--state-server state))
+                 (memq (plist-get (static-site--state-preview state) :phase)
+                       '(checking starting ready building error))))
     (user-error "Stop the watching preview first; it already rebuilds on save")))
 
 (defun static-site--command (command)
@@ -136,15 +232,47 @@ known hosts and jump hosts there, never passwords or private key contents."
 
 (defun static-site--build-steps (root)
   "Capture build and validation commands rooted at ROOT."
-  (append
-   (mapcar (lambda (plugin)
+  (let* ((directory (file-name-as-directory (expand-file-name static-site-build-directory root)))
+         (default-directory directory))
+    (unless (and (not (file-remote-p directory)) (file-directory-p directory))
+      (user-error "Build directory must exist locally: %s" directory))
+    (cl-labels ((scripts (plugins)
+                (mapcar (lambda (plugin)
              (unless (and (consp plugin) (stringp (car plugin)))
                (user-error "A generator plugin must be (NAME PROGRAM ARGUMENT...)"))
-             (cons root (static-site--command (cdr plugin))))
-           static-site-generators)
-   (delq nil (list (cons root (static-site--command static-site-build-command))
-                   (when static-site-verify-command
-                     (cons root (static-site--command static-site-verify-command)))))))
+             (cons directory (static-site--command (cdr plugin)))) plugins)))
+      (append (scripts static-site-generators)
+              (when static-site-build-command
+                (list (cons directory (static-site--command static-site-build-command))))
+              (scripts static-site-post-build-generators)
+              (when static-site-verify-command
+                (list (cons directory (static-site--command static-site-verify-command))))))))
+
+(defun static-site--environment (root)
+  "Capture the effective process environment and search path for ROOT."
+  (let* ((process-environment (copy-sequence process-environment))
+         (extra (mapcar (lambda (path) (expand-file-name path root)) static-site-exec-path))
+         (path (append extra (copy-sequence exec-path))))
+    (dolist (pair static-site-environment)
+      (unless (and (stringp (car pair)) (not (string-match-p "[=\0]" (car pair)))
+                   (or (null (cdr pair)) (stringp (cdr pair))))
+        (user-error "Invalid site environment entry"))
+      (setenv (car pair) (cdr pair)))
+    (when (assoc-string "PATH" static-site-environment (eq system-type 'windows-nt))
+      (setq path (append extra (parse-colon-path (or (getenv "PATH") "")))))
+    (when extra
+      (setenv "PATH" (mapconcat #'identity (append extra (list (or (getenv "PATH") "")))
+                               path-separator)))
+    (cons process-environment path)))
+
+;;;###autoload
+(defun static-site-project-dispatch ()
+  "Show site commands for the project selected by Projectile or project.el."
+  (interactive)
+  (static-site--configure)
+  (set-transient-map (lookup-key static-site-mode-map (kbd "C-c s")) t)
+  (message "Site %s: c build, s preview, q stop, b browser, e EWW, n article, i template, f files"
+           (abbreviate-file-name (static-site--root))))
 
 ;;;###autoload
 (defun static-site-make4ht-setup (file)
@@ -175,17 +303,34 @@ settings or persist them in trusted directory locals.  No files are changed."
 (defun static-site-open-public ()
   "Inspect this project's generated static files in Dired."
   (interactive)
+  (static-site--configure)
   (dired (static-site--public (static-site--root))))
 
 (defun static-site--buffer (state kind)
   "Create a project-specific diagnostics buffer for STATE and KIND."
-  (let ((buffer (get-buffer-create
+  (let ((settings (cl-remove-if-not
+                   (lambda (pair) (and (consp pair)
+                                       (string-prefix-p "static-site-" (symbol-name (car pair)))
+                                       (not (string-prefix-p "static-site--" (symbol-name (car pair))))))
+                   (buffer-local-variables)))
+        (rules static-site-error-regexp-alist)
+        (command static-site-build-command)
+        (directory (expand-file-name static-site-build-directory (static-site--state-root state)))
+        (buffer (get-buffer-create
                  (format "*static-site %s: %s*" kind (static-site--state-root state)))))
     (with-current-buffer buffer
       (let ((inhibit-read-only t)) (erase-buffer))
       (compilation-mode)
-      (setq-local default-directory (static-site--state-root state)
-                  static-site-root (static-site--state-root state)))
+      (dolist (setting settings)
+        (set (make-local-variable (car setting)) (copy-tree (cdr setting))))
+      (setq-local default-directory directory
+                  static-site-root (static-site--state-root state)
+                  static-site-build-command command
+                  compilation-error-regexp-alist
+                  (or rules
+                      (cons '("^\\(?:.*htlatex:[ \t]+\\)\\(.+?\\)[ \t]+\\([0-9]+\\)[ \t]+" 1 2)
+                            compilation-error-regexp-alist)))
+      (add-hook 'compilation-filter-hook #'ansi-color-compilation-filter nil t))
     (display-buffer buffer)
     buffer))
 
@@ -200,23 +345,38 @@ settings or persist them in trusted directory locals.  No files are changed."
   "Run directory/argv STEPS serially for STATE, logging to BUFFER.
 Call DONE once with non-nil on success, nil on failure or cancellation."
   (static-site--idle state)
-  (cl-labels
+  (let ((environment (copy-sequence process-environment))
+        (search-path (copy-sequence exec-path))
+        (steps (copy-tree steps)))
+    (cl-labels
       ((finish (ok)
          (setf (static-site--state-process state) nil)
          (static-site--log buffer (if ok "\nFinished successfully.\n" "\nFailed or cancelled.\n"))
-         (condition-case err (funcall done ok)
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (setq header-line-format (propertize (if ok "Site job succeeded" "Site job FAILED — see diagnostics")
+                                                  'face (if ok 'success 'error))))
+           (unless ok (display-buffer buffer)))
+         (condition-case err
+             (let ((process-environment (copy-sequence environment))
+                   (exec-path (copy-sequence search-path))
+                   (default-directory (static-site--state-root state)))
+               (funcall done ok))
            (error (static-site--log buffer (format "\n%s\n" (error-message-string err)))
                   (message "Site job failed: %s" (error-message-string err)))))
        (next (remaining)
          (if (null remaining) (finish t)
            (let* ((step (car remaining))
                   (default-directory (car step))
+                  (process-environment (copy-sequence environment))
+                  (exec-path (copy-sequence search-path))
                   (argv (cdr step)))
              (static-site--log buffer (format "\nRunning %S\n" argv))
              (condition-case err
                  (setf (static-site--state-process state)
                        (make-process
                         :name "static-site-job" :buffer buffer :command argv
+                        :filter #'compilation-filter
                         :connection-type 'pipe :coding 'utf-8-unix :noquery nil
                         :sentinel
                         (lambda (process _event)
@@ -224,6 +384,7 @@ Call DONE once with non-nil on success, nil on failure or cancellation."
                                      (not (process-get process 'static-site-finished)))
                             (process-put process 'static-site-finished t)
                             (if (and (eq (process-status process) 'exit)
+                                     (not (process-get process 'static-site-cancelled))
                                      (= (process-exit-status process) 0))
                                 (next (cdr remaining))
                               (static-site--log buffer
@@ -231,7 +392,7 @@ Call DONE once with non-nil on success, nil on failure or cancellation."
                               (finish nil))))))
                (error (static-site--log buffer (concat (error-message-string err) "\n"))
                       (finish nil)))))))
-    (next steps)))
+      (next steps))))
 
 ;;;###autoload
 (defun static-site-build ()
@@ -239,15 +400,18 @@ Call DONE once with non-nil on success, nil on failure or cancellation."
   (interactive)
   (let ((state (static-site--state)))
     (static-site--idle state t)
-    (static-site--run state (static-site--build-steps (static-site--state-root state))
+    (let* ((context (static-site--environment (static-site--state-root state)))
+           (process-environment (car context)) (exec-path (cdr context)))
+      (static-site--run state (static-site--build-steps (static-site--state-root state))
                       (static-site--buffer state "build")
-                      (lambda (ok) (message "Site build %s" (if ok "succeeded" "failed; see diagnostics"))))))
+                      (lambda (ok) (message "Site build %s" (if ok "succeeded" "failed; see diagnostics")))))))
 
 ;;;###autoload
 (defun static-site-cancel ()
   "Cancel this project's active build or transfer."
   (interactive)
   (when-let* ((process (static-site--state-process (static-site--state))))
+    (process-put process 'static-site-cancelled t)
     (static-site--terminate process)))
 
 (defun static-site--terminate (process)
@@ -267,44 +431,9 @@ Call DONE once with non-nil on success, nil on failure or cancellation."
       ;; Unlike deleting just the process object, this signals its process group.
       (kill-process process))))
 
-;;;###autoload
-(defun static-site-preview-start ()
-  "Start the configured preview command once for this project."
-  (interactive)
-  (let ((state (static-site--state)))
-    (static-site--idle state)
-    (unless (process-live-p (static-site--state-server state))
-      (let ((default-directory (static-site--state-root state))
-            (command (static-site--command static-site-preview-command))
-            (buffer (static-site--buffer state "preview")))
-        (setf (static-site--state-watches state) static-site-preview-watches
-              (static-site--state-server state)
-              (make-process :name "static-site-preview" :buffer buffer
-                            :command command :connection-type 'pipe :coding 'utf-8-unix
-                            :noquery t
-                            :sentinel (lambda (process event)
-                                        (unless (process-live-p process)
-                                          (static-site--log buffer event)))))))
-    (static-site--state-server state)))
-
-;;;###autoload
-(defun static-site-preview-stop ()
-  "Stop only the preview process started for this project."
-  (interactive)
-  (let ((process (static-site--state-server (static-site--state))))
-    (static-site--terminate process)))
-
-;;;###autoload
-(defun static-site-preview-browser ()
-  "Open the configured preview URL in the system browser."
-  (interactive)
-  (browse-url-default-browser static-site-preview-url))
-
-;;;###autoload
-(defun static-site-preview-eww ()
-  "Open the configured preview URL in EWW."
-  (interactive)
-  (eww static-site-preview-url))
+(dolist (command '(static-site-preview-start static-site-preview-stop static-site-preview-follow static-site-preview-browser static-site-preview-eww static-site-preview-status)) (autoload command "static-site-preview" nil t))
+(dolist (command '(static-site-author-mode static-site-insert-template static-site-new-article))
+  (autoload command "static-site-author" nil t))
 
 (defun static-site--destination ()
   "Validate and return the SSH destination, never a daemon URL."
@@ -422,7 +551,9 @@ Never change the remote site.  Only a successful dry run enables publishing."
   (let* ((state (static-site--state))
          (root (static-site--state-root state)))
     (static-site--idle state t)
-    (let* ((destination (static-site--destination))
+    (let* ((context (static-site--environment root))
+           (process-environment (car context)) (exec-path (cdr context))
+           (destination (static-site--destination))
            (command (static-site--rsync-command destination))
            (source (static-site--public root))
            (entry static-site-entry-file)
@@ -444,6 +575,8 @@ Never change the remote site.  Only a successful dry run enables publishing."
                     (progn
                       (setf (static-site--state-plan state)
                             (list :snapshot snapshot :command command
+                                  :environment (copy-sequence process-environment)
+                                  :exec-path (copy-sequence exec-path)
                                   :destination destination :delete delete))
                       (message "Review the dry run, then M-x static-site-deploy-publish"))
                   (static-site--remove-snapshot root snapshot)
@@ -467,13 +600,15 @@ SSH configuration remains external; preview again after changing it."
                    (if (plist-get plan :delete) " (including remote deletions)" "")))
       (static-site--check-tree snapshot)
       (setf (static-site--state-plan state) nil)
-      (static-site--run
+      (let ((process-environment (copy-sequence (plist-get plan :environment)))
+            (exec-path (copy-sequence (plist-get plan :exec-path))))
+        (static-site--run
        state (list (cons (file-name-as-directory snapshot) (plist-get plan :command)))
        (static-site--buffer state "publish")
        (lambda (ok)
          (static-site--remove-snapshot root snapshot)
          (message (if ok "Site published successfully"
-                    "Publish failed or cancelled; remote files may be partially updated. Run a new preview.")))))))
+                    "Publish failed or cancelled; remote files may be partially updated. Run a new preview."))))))))
 
 (defvar static-site-mode-map
   (let ((map (make-sparse-keymap)))
@@ -487,13 +622,16 @@ SSH configuration remains external; preview again after changing it."
     (define-key map (kbd "C-c s f") #'static-site-open-project)
     (define-key map (kbd "C-c s o") #'static-site-open-public)
     (define-key map (kbd "C-c s k") #'static-site-cancel)
+    (define-key map (kbd "C-c s n") #'static-site-new-article)
+    (define-key map (kbd "C-c s i") #'static-site-insert-template)
     map))
 
 ;;;###autoload
 (define-minor-mode static-site-mode
   "Opt-in commands for the current static-site project.
 The configured preview command owns file watching and browser live reload."
-  :lighter " Site" :keymap static-site-mode-map)
+  :lighter " Site" :keymap static-site-mode-map
+  (static-site-author-mode (if static-site-mode 1 -1)))
 
 (provide 'static-site)
 ;;; static-site.el ends here

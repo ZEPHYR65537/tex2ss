@@ -1,24 +1,29 @@
-# Local validation — 2026-09-20
+# Local validation — static-site 0.2.0
 
-Tested with Emacs 31.1, Windows, TeX Live 2025/make4ht 0.4d, and the existing Node-based comparison projects. These are observed local results, not a cross-platform or production guarantee.
+Observed on 2026-09-20 with Emacs 31.1, Windows, TeX Live 2025/make4ht 0.4d and Node 24.19.0. The declared Emacs minimum remains 28.1; other versions and operating systems were not exercised.
 
-| Check | Result |
+| Check | Observed result |
 | --- | --- |
-| Byte compilation with warnings treated as errors | Passed for the standalone package and both blog adapters |
-| Standalone ERT regression suite | 20/20 passed; final run at 20:33 Asia/Shanghai |
-| Blog adapter tests | 3/3 passed in each comparison branch |
-| Direct make4ht, no framework | Script plugin generated TeX, make4ht produced MathML/HTML, and a publish snapshot retained the content; 5.48 seconds |
-| Native extension compatibility | Outer script + `.cfg` + explicit `.mk4` + Lua filter + named `inlinecss` extension passed together; 2.56 seconds; HTML assertions checked the actual transformations |
-| make4ht branch integration | Build + validation, real EWW rendering, source save -> rebuild -> EWW refresh, restoration of source bytes, and preview shutdown passed |
-| Astro branch integration | Same checks passed with the Astro build pipeline |
-| Package copies | Standalone and both branch copies of `static-site.el` are byte-identical |
+| Three runtime modules and adapters | Byte compilation passed |
+| Package workflow regression suite | 37/37 passed, including real child processes and loopback servers; about 18 seconds |
+| Two adapters in the same session | Correct root/backend/output in both load orders; directory-local overrides preserved |
+| Temporary environments | Both asynchronous steps and completion callback saw the captured environment and executable path |
+| Generic framework/static-file projects | Ordered pre-build, build, post-build and verify steps; custom working directory; nil build supported |
+| Preview | Delayed readiness, instance/root/backend identity, port conflict, bounded request timeout, error/recovery, cancellation and externally owned server preservation passed |
+| Source diagnostics | Native make4ht and mapped GNU diagnostics navigated to the original file/line, including spaces in filenames |
+| Metadata/templates | Context-sensitive keys/enums, nested braced metadata, comments, literal templates and cursor placement passed |
+| Native make4ht alone | Generated content, mathematics, HTML and snapshot smoke passed in 3.32 seconds |
+| Native make4ht extension mechanisms | `.cfg`, `.mk4`, Lua filter, `inlinecss` and outer generation script passed together in 2.62 seconds |
+| Two live blog previews | Both ran in one Emacs session; saving one fixture refreshed only its EWW buffer; a real undefined TeX command reported original source line 8; recovery and independent stopping passed |
 
-The regression suite includes real asynchronous processes, nonzero exits, cancellation, argument safety, output/destination path guards, script ordering, separate project state, SSH security flags, snapshot isolation, dry-run failure and publishing confirmation. Windows process-tree cancellation tests run outside the restricted execution sandbox; they terminate only test-owned processes.
+The two-project integration against the installed shared package took 30.17 seconds with warm caches; the earlier run including initial builds took 116.39 seconds. Temporary articles were removed and both projects rebuilt successfully. Original authored files and the original `jddblog/` checkout were not edited. Local preview tests choose their own ephemeral ports.
 
-Full first builds took about 122 seconds (make4ht) and 128 seconds (Astro) in this environment. Observed warm build + validation times were 3.09–6.96 seconds for make4ht and 8.14 seconds for Astro, each for the existing 53-page collection. These timings depend on the generator's cache, hardware and concurrent work. The package runs external jobs asynchronously and avoids duplicate jobs per project; it does not provide its own TeX cache. Snapshot validation and copying remain synchronous filesystem operations.
+After the cache-key correction, warm 53-page builds converted zero TeX documents: 1.03 seconds for the standalone renderer and 2.62 seconds for Astro. Both output verifiers passed (1,759 and 1,812 links respectively). These are local observations, not performance guarantees.
 
-Remote rsync transfer was **not** exercised: no destination was supplied and rsync is absent from the current Windows PATH. SSH/rsync arguments and the transfer state machine were tested offline, with transfer execution substituted in those tests. Server authentication, permissions, Windows rsync compatibility, network interruption recovery and real remote mirroring still need an integration check against the intended server.
+The installed package is now the shared dependency. Blog repositories retain project adapters and their own build/native make4ht files; duplicate package modules and tests have been removed. Tests do not require a running user's Emacs session. Windows process-tree cleanup tests require permission to stop their own child processes.
 
-Native compatibility means the outer script mechanism coexists with make4ht's own build and extension machinery. It is not itself the make4ht extension API, and untested third-party extensions may have their own requirements.
+Build processes and HTTP checks are asynchronous. There is one request at a time per preview and no package-owned recursive source watcher. Source caching remains the generator's responsibility; the blog pipelines use relative cache keys so Windows drive-letter capitalization does not invalidate every document. Snapshot validation/copying still runs synchronously and can pause Emacs for large output trees.
 
-No site was deployed. The original `jddblog/` checkout was not edited. Temporary source edits in both comparison projects were restored. Existing preview servers were left alone; integration checks used their own loopback ports 45173 and 45174.
+Native compatibility demonstrates coexistence with the tested make4ht mechanisms, not universal compatibility with every third-party extension. Plain HTTP servers have availability checks; project/backend verification and EWW revision refresh require the optional status decoder. The blog server supplies that decoder contract.
+
+No live deployment occurred. Rsync is absent from this Windows PATH and no destination was supplied. SSH argument enforcement, snapshot ownership and transfer state transitions are tested offline; actual authentication, remote permissions and synchronization still require a test against the intended server. This package does not provide atomic deployment or rollback.

@@ -1,4 +1,5 @@
 ;;; check-make4ht.el --- Framework-free make4ht smoke check -*- lexical-binding: t; -*-
+(setq load-prefer-newer t)
 (require 'static-site)
 
 (let* ((package-root (file-name-directory load-file-name))

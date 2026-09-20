@@ -26,6 +26,11 @@
           (static-site-verify-command nil))
      (unwind-protect (progn ,@body)
        (maphash (lambda (_ state)
+                  (when (and (featurep 'static-site-preview) (static-site--state-preview state))
+                    (let ((session (static-site--state-preview state)))
+                      (setf (plist-get session :phase) 'stopped)
+                      (when-let* ((timer (plist-get session :timer))) (cancel-timer timer))
+                      (static-site-preview--close-request session)))
                   (dolist (process (list (static-site--state-process state)
                                         (static-site--state-server state)))
                     (when (process-live-p process) (delete-process process))))
@@ -275,4 +280,4 @@
                                                (static-site--snapshot (static-site--root) public "main.html"))))
       (should-error (static-site--snapshot (static-site--root) public "../outside.html") :type 'user-error))))
 
-(ert-run-tests-batch-and-exit)
+(unless (bound-and-true-p static-site-test-defer) (ert-run-tests-batch-and-exit))

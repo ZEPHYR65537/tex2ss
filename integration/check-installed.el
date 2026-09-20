@@ -16,3 +16,10 @@
                  (file-in-directory-p (symbol-file 'static-site-build 'defun) expected))
       (error "Installed package did not load correctly on demand"))))
 (message "INSTALLED_PACKAGE_AUTOLOAD_AND_MODE_OK")
+(unless (eq (lookup-key project-prefix-map (kbd "C-s")) 'static-site-project-dispatch)
+  (error "project.el site menu missing"))
+;; Also verify the first invocation can load each split module correctly.
+(dolist (entry '((static-site-preview-status . static-site-preview)
+                 (static-site-author-mode . static-site-author)))
+  (autoload-do-load (symbol-function (car entry)) (car entry))
+  (unless (featurep (cdr entry)) (error "Module autoload failed: %s" entry)))
