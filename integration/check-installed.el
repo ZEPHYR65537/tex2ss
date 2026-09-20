@@ -1,0 +1,18 @@
+;;; check-installed.el --- Check installed local package -*- lexical-binding: t; -*-
+(setq user-emacs-directory (file-name-as-directory (getenv "STATIC_SITE_EMACS_DIR")))
+(add-to-list 'load-path (expand-file-name "lisp/" user-emacs-directory))
+(require 'init-static-site)
+(unless (and (not (featurep 'static-site))
+             (autoloadp (symbol-function 'static-site-build))
+             (commandp 'static-site-mode))
+  (error "Static-site commands were not lazily registered"))
+(let ((expected (expand-file-name "pkg/static_site/" user-emacs-directory)))
+  (unless (file-in-directory-p (locate-library "static-site") expected)
+    (error "Static-site resolves outside the installed package"))
+  (with-temp-buffer
+    (static-site-mode 1)
+    (unless (and (featurep 'static-site)
+                 (eq (key-binding (kbd "C-c s c")) 'static-site-build)
+                 (file-in-directory-p (symbol-file 'static-site-build 'defun) expected))
+      (error "Installed package did not load correctly on demand"))))
+(message "INSTALLED_PACKAGE_AUTOLOAD_AND_MODE_OK")
