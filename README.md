@@ -6,6 +6,8 @@ This is version 0.2.0, tested locally with Emacs 31.1 on Windows. The declared m
 
 ## Install
 
+See [the public API and site-plugin design](docs/SITE-PLUGIN-DESIGN.md) for the proposed next steps. The new interfaces described there are not implemented yet. Develop in a separate checkout, then synchronize the installation through Git when authorized; keep global Emacs configuration outside this workflow.
+
 Put this directory on `load-path` in your own Emacs configuration:
 
 ```elisp
