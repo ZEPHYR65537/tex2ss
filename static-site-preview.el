@@ -56,7 +56,7 @@ Only explicitly followed external servers may omit the token check."
       (when-let* ((process (get-buffer-process buffer))) (delete-process process))
       (kill-buffer buffer))))
 
-(defun static-site-preview--request (session callback)
+(defun static-site-preview--request-start (session callback)
   "GET SESSION's endpoint once; call CALLBACK with HTTP code and body.
 A nil code denotes a transport error, and `timeout' denotes a deadline.
 Only one request is outstanding per session; proxies and cookies are unused."
@@ -89,6 +89,40 @@ Only one request is outstanding per session; proxies and cookies are unused."
         (setf (plist-get session :request-timer)
               (run-at-time (plist-get session :request-timeout) nil
                            (lambda () (finish 'timeout "HTTP check timed out"))))))))
+
+(defun static-site-preview--request (session callback)
+  "Coalesce SESSION's concurrent callers onto one bounded HTTP request."
+  (unless (plist-member session :request-callbacks) (nconc session (list :request-callbacks nil)))
+  (push callback (plist-get session :request-callbacks))
+  (unless (plist-get session :request)
+    (static-site-preview--request-start
+     session
+     (lambda (code body)
+       (let ((callbacks (plist-get session :request-callbacks)))
+         (setf (plist-get session :request-callbacks) nil)
+         (dolist (fn (reverse callbacks))
+           (condition-case err (funcall fn code body)
+             (error (message "Preview callback failed: %s" (error-message-string err))))))))))
+
+(defvar-local static-site-preview--dirty-url nil)
+(defun static-site-preview--visible (window)
+  "Refresh a dirty EWW buffer when WINDOW displays it."
+  (with-current-buffer (window-buffer window)
+    (when static-site-preview--dirty-url
+      (let ((url static-site-preview--dirty-url))
+        (setq static-site-preview--dirty-url nil)
+        (when (equal url (plist-get eww-data :url)) (eww-reload))))))
+
+(defun static-site-preview-notify-save ()
+  "Request a short burst of status checks; never start a build or server."
+  (when-let* ((state (gethash (static-site--root) static-site--states))
+              (session (static-site--state-preview state)))
+    (when (static-site-preview--active state session)
+      (setf (plist-get session :hurry-until) (+ (float-time) 8)
+            (plist-get session :idle-count) 0)
+      (unless (plist-get session :request)
+        (when-let* ((timer (plist-get session :timer))) (cancel-timer timer))
+        (setf (plist-get session :timer) (run-at-time 0.2 nil #'static-site-preview--poll state session))))))
 
 (defun static-site-preview--show (session phase detail)
   "Show a changed PHASE and DETAIL without repeated failure notifications."
@@ -132,7 +166,8 @@ Only one request is outstanding per session; proxies and cookies are unused."
   (when (plist-get session :decoder) (static-site-preview--identity session status))
   (let ((error-text (plist-get status :error))
         (revision (plist-get status :revision))
-        (old (plist-get session :revision)))
+        (old (plist-get session :revision))
+        (pages (plist-get status :page-revisions)))
     (cond
      (error-text (static-site-preview--show session 'error error-text))
      ((plist-get status :building) (static-site-preview--show session 'building "Building; previous output may be stale"))
@@ -146,9 +181,17 @@ Only one request is outstanding per session; proxies and cookies are unused."
           (with-current-buffer buffer
             (when (and (derived-mode-p 'eww-mode)
                        (string-prefix-p (file-name-as-directory (plist-get session :url))
-                                        (or (plist-get eww-data :url) "")))
-              (eww-reload)))))
-      (setf (plist-get session :revision) revision)
+                                        (or (plist-get eww-data :url) ""))
+                       (let* ((route (car (split-string (url-filename (url-generic-parse-url (plist-get eww-data :url))) "[?#]")))
+                              (hash (cdr (assoc route pages))))
+                         (or (null hash) (not (equal hash (cdr (assoc route (plist-get session :page-revisions))))))))
+              (if (get-buffer-window buffer t) (eww-reload)
+                (setq-local static-site-preview--dirty-url (plist-get eww-data :url))
+                (add-hook 'window-buffer-change-functions #'static-site-preview--visible nil t))))))
+      (setf (plist-get session :idle-count)
+            (if (equal revision old) (1+ (or (plist-get session :idle-count) 0)) 0)
+            (plist-get session :page-revisions) pages
+            (plist-get session :revision) revision)
       (let ((callbacks (plist-get session :callbacks)))
         (setf (plist-get session :callbacks) nil)
         (dolist (callback callbacks)
@@ -165,9 +208,13 @@ Only one request is outstanding per session; proxies and cookies are unused."
 (defun static-site-preview--schedule (state session)
   "Schedule the next check for STATE and SESSION without overlapping requests."
   (when (static-site-preview--active state session)
+    (when-let* ((timer (plist-get session :timer))) (cancel-timer timer))
     (setf (plist-get session :timer)
-          (run-at-time (if (eq (plist-get session :phase) 'starting) 0.3
-                         (plist-get session :interval)) nil
+          (run-at-time (cond
+                        ((memq (plist-get session :phase) '(starting building)) 0.3)
+                        ((> (or (plist-get session :hurry-until) 0) (float-time)) 0.4)
+                        (t (min 30 (* (plist-get session :interval)
+                                      (expt 2 (min 4 (floor (or (plist-get session :idle-count) 0) 3))))))) nil
                        #'static-site-preview--poll state session))))
 
 (defun static-site-preview--poll (state session)
@@ -228,7 +275,7 @@ Only one request is outstanding per session; proxies and cookies are unused."
       (user-error "Preview working directory does not exist"))
     (list :root root :backend static-site-backend :owned owned
           :buffer nil :request nil :request-timer nil :timer nil :display nil
-          :callbacks nil :revision nil :ready-once nil :eww-buffers nil
+          :request-callbacks nil :idle-count 0 :hurry-until 0 :page-revisions nil :callbacks nil :revision nil :ready-once nil :eww-buffers nil
           :command (when owned (static-site--command static-site-preview-command))
           :directory directory :environment (copy-sequence process-environment)
           :exec-path (copy-sequence exec-path) :url static-site-preview-url
@@ -290,12 +337,22 @@ Only one request is outstanding per session; proxies and cookies are unused."
   (interactive)
   (let* ((state (static-site--state)) (session (static-site--state-preview state)))
     (when session
-      (static-site-preview--show session 'stopped "Stopped")
+      (static-site-preview--show session
+        (if (and (plist-get session :owned) (process-live-p (static-site--state-server state))) 'stopping 'stopped)
+        "Stopping owned preview")
       (setf (plist-get session :callbacks) nil)
       (when-let* ((timer (plist-get session :timer))) (cancel-timer timer))
       (static-site-preview--close-request session)
       (when (plist-get session :owned)
-        (static-site--terminate (static-site--state-server state))))))
+        (static-site--terminate (static-site--state-server state))
+        (cl-labels ((finished ()
+                      (when (eq session (static-site--state-preview state))
+                        (if (let ((server (static-site--state-server state)))
+                              (and server (or (process-live-p server)
+                                              (process-get server 'static-site-stopping))))
+                            (run-at-time 0.05 nil #'finished)
+                          (static-site-preview--show session 'stopped "Stopped")))))
+          (finished))))))
 
 (defun static-site-preview--open (browser)
   "Open this project's preview in BROWSER after verified readiness."

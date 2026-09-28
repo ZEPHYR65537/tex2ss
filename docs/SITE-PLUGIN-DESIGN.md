@@ -1,6 +1,6 @@
 # static-site：公开接口与站点插件设计
 
-状态：2026-09-28 设计提案；在现有0.2.0上演进，新 API 尚未实现。
+状态：2026-09-28 已实现 API v1，包版本 0.3.0；使用方式见 [公开 API 指南](PLUGIN-API.md)。下文保留设计目标，实际支持范围以指南和文末记录为准。
 基线：独立包提交 57d6b56；博客只保留自己的适配器。
 开发目录：D:/jddtest/Site Compiler/static-site-dev；独立安装目录：~/.emacs.d/pkg/static_site。
 仅在开发目录内修改、提交并推送，再经明确授权通过 Git 同步安装目录；不直接写入安装目录或全局 Emacs 配置。
@@ -15,7 +15,7 @@ LaTeX .sty/.4ht、make4ht .mk4、目录和缓存仍归站点/编译器。框架�
 
 站点贡献只在相应 root 的启用缓冲区/会话生效。不得用全局 LaTeX hook、setq-default 或全局按键实现站点功能。
 
-## 2. 当前基础与缺口
+## 2. 实施前的基础与缺口
 
 已经具备：独立三个运行模块、可配置命令/步骤、异步进程、异步 HTTP、项目隔离、目录局部设置、环境快照、可选状态协议、模板和错误导航。
 
@@ -28,7 +28,7 @@ LaTeX .sty/.4ht、make4ht .mk4、目录和缓存仍归站点/编译器。框架�
 保留 static-site-register-project ROOT SETTINGS 和原有配置变量。简单项目只配命令即可；高级站点增加：
 
 ~~~elisp
-;; 提议 API；现在不可直接执行。
+;; API v1；变量由站点插件提供。
 (static-site-register-plugin
  root 'jddblog
  (list :api-version 1
@@ -56,7 +56,7 @@ LaTeX .sty/.4ht、make4ht .mk4、目录和缓存仍归站点/编译器。框架�
 
 第一版只承诺少量入口，不公开可变 state struct：
 
-| 提议接口 | 契约 |
+| 公开接口 | 契约 |
 | --- | --- |
 | static-site-context | 当前项目的只读快照：root、backend、source buffer、目录、环境、插件版本 |
 | static-site-register-plugin | 指定 root 的注册入口，与旧 register-project 共存 |
@@ -73,7 +73,7 @@ LaTeX .sty/.4ht、make4ht .mk4、目录和缓存仍归站点/编译器。框架�
 - 常见 action id 为 build、verify、deploy-preview、deploy-publish、deploy-forget；站点可加 doctor、deploy 等动作。
 - 简单动作声明 argv/工作目录；复杂动作提供 (lambda (context done) ...)。
 - provider 可调用公开 job/probe API，不能同步执行耗时编译或网络请求。
-- job spec 包含有序 argv 步骤、工作目录、环境覆盖、诊断格式和是否写构建输出。默认不是 shell 字符串；管道由项目脚本负责。
+- job spec 支持 :argv 或 :steps、:directory、:environment。当前统一使用 compilation 日志和互斥写任务；不开放自定义诊断格式/只读 job 分类。默认不是 shell 字符串；管道由项目脚本负责。
 - done 恰好调用一次，返回 :status（success/error/cancelled）、可选退出码/消息/provider 数据；异常转换成失败，取消不算成功。
 - action 在第一次异步预检前取得所有权；避免两个命令同时检查空闲再各自启动。其内部 job 复用该所有权。
 - 同 root 互斥写任务不得重叠；不同 root 可并行。watching preview 与独立构建互斥；只读状态查询无需独占写锁。
@@ -89,7 +89,7 @@ LaTeX .sty/.4ht、make4ht .mk4、目录和缓存仍归站点/编译器。框架�
 
 provider 如果提供 preview/publish，计划绑定 root、provider、实际目标和内容版本，失败/切站点后不可复用错计划。博客保持现有 plan ID 契约。只有单阶段发布的 provider 也可以注册自己的动作。
 
-不需要部署的项目不注册相关动作；菜单据能力显示。构建和预览不依赖部署模块。
+不需要部署的项目不注册相关动作。旧通用菜单为兼容保留 rsync 入口，执行时才加载可选模块；可用 static-site-action-available-p 判断插件 provider。构建和预览不依赖部署模块。
 
 ## 5. 站点局部的写作扩展
 
@@ -97,7 +97,7 @@ provider 如果提供 preview/publish，计划绑定 root、provider、实际目
 
 - 保留字符串+光标标记和插入函数两种现有模板，零额外依赖。
 - 站点提供 BlogImage、widget、自定义环境模板；核心不解释其 TeX/HTML 语义。
-- 可选 YASnippet 桥接提供占位参数；表按 plugin/root 命名，仅匹配 buffer 激活，不写全局 latex-mode 表或全局 snippet 目录。
+- 可选 YASnippet 桥接直接调用已启用的 yas-expand-snippet，未启用则使用普通文本后备；不安装 snippet 表或写全局目录。
 - 不强制维护两套模板；复杂插入可直接提供函数，不新增一门 snippet 语言。
 
 ### 自定义环境与 AUCTeX
@@ -130,7 +130,7 @@ provider 如果提供 preview/publish，计划绑定 root、provider、实际目
 - 元信息 CAPF 改单次扫描，必要时按 buffer modification tick 缓存；保持字符扫描上限、嵌套/注释正确性。
 - 日志优化先测量，不为了截断输出破坏 compilation-mode 定位。
 - 博客 watcher/hash/staging 统一排除 AUCTeX 生成文件；核心不对所有站点硬编码 auto/ 过滤。
-- 通用 rsync provider 的大目录快照仍应迁到异步外部过程；这不阻塞博客既有外部部署脚本。
+- 通用 rsync provider 的快照校验/复制已迁到独立 batch Emacs 过程；publish 前的文件树校验仍同步。博客使用既有外部部署脚本。
 
 ## 7. 迁移顺序
 
@@ -163,4 +163,10 @@ provider 如果提供 preview/publish，计划绑定 root、provider、实际目
 
 博客仓库 docs/CONFIGURATION-AND-MATH-DESIGN.md 定义数学配置和渲染职责。本规范不复制其文章 schema、SVG 资源或原生 make4ht 规则。
 
-用户已确认方向为“通用静态站点框架 + 每站点插件”，且其他 LaTeX 写作体验保持不变。接口名字和 descriptor 是本轮建议，后续实现以本验收矩阵为准；本轮不修改运行模块或全局配置。
+用户已确认方向为“通用静态站点框架 + 每站点插件”，且其他 LaTeX 写作体验保持不变。本轮在独立开发副本中实现运行模块和博客适配器，没有修改安装目录或全局配置。
+
+## 10. 实施记录
+
+公开入口、root/ID 注册、预检前动作锁、上下文快照、异步取消、可选 rsync、局部扩展与预览优化已实现。博客适配器不再调用框架私有函数。新站点示例与精确 job/callback 契约见 PLUGIN-API.md；旧变量和 register-project 继续可用。
+
+Windows/Emacs 31.1：原工作流 37 项回归通过，新增 API 9 项通过，博客适配器 6 项通过；真实 EWW 集成覆盖启动、修改后刷新、原文错误定位、失败恢复和停止。非博客生成器使用真实异步命令验证；没有向真实托管服务发布。根目录变化在下一次 context/action 或重新启用时清理，不增加逐键扫描。复杂 AUCTeX/YAS 交互和其他操作系统仍需在对应实际环境验证。

@@ -1,6 +1,6 @@
 ;;; static-site.el --- Build, preview and publish static sites -*- lexical-binding: t; -*-
 
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, web
 
@@ -22,6 +22,12 @@
 (declare-function projectile-project-root "projectile")
 (defvar projectile-require-project-root)
 (defvar static-site-mode-map)
+(defvar static-site--owner nil)
+(declare-function static-site--copy "static-site-api")
+(declare-function static-site-preview-notify-save "static-site-preview")
+(declare-function static-site-rsync-deploy-preview "static-site-deploy-rsync")
+(declare-function static-site-rsync-deploy-publish "static-site-deploy-rsync")
+(declare-function static-site-rsync-deploy-forget "static-site-deploy-rsync")
 (declare-function static-site-preview-start "static-site-preview")
 (declare-function static-site-preview-stop "static-site-preview")
 (declare-function static-site-preview-browser "static-site-preview")
@@ -136,7 +142,7 @@ known hosts and jump hosts there, never passwords or private key contents."
   (make-variable-buffer-local variable))
 
 (cl-defstruct (static-site--state (:constructor static-site--make-state))
-  root process server watches plan preview)
+  root process server watches plan preview action)
 (defvar static-site--states (make-hash-table :test #'equal))
 (defvar static-site--projects (make-hash-table :test #'equal)
   "Explicit adapter settings indexed by canonical project root.")
@@ -150,7 +156,7 @@ precedence.  Loading another adapter never changes an existing project's jobs."
     (unless (and (consp setting) (symbolp (car setting))
                  (string-prefix-p "static-site-" (symbol-name (car setting))))
       (error "Invalid static-site setting: %S" setting)))
-  (puthash (file-name-as-directory (file-truename root)) (copy-tree settings)
+  (puthash (file-name-as-directory (file-truename root)) (static-site--copy settings)
            static-site--projects))
 
 (defun static-site--detected-root ()
@@ -178,7 +184,7 @@ precedence.  Loading another adapter never changes an existing project's jobs."
 
 (defun static-site--configure ()
   "Apply this project's adapter defaults, respecting explicit local settings."
-  (let ((settings (gethash (static-site--root) static-site--projects)))
+  (let ((settings (static-site--plugin-settings (static-site--root))))
     (dolist (setting static-site--applied-settings)
       (when (and (not (assq (car setting) settings))
                  (equal (symbol-value (car setting)) (cdr setting)))
@@ -191,8 +197,8 @@ precedence.  Loading another adapter never changes an existing project's jobs."
                           (previous (assq variable static-site--applied-settings)))
                      (when (or (not (local-variable-p variable))
                                (and previous (equal (symbol-value variable) (cdr previous))))
-                       (set (make-local-variable variable) (copy-tree (cdr setting)))
-                       (cons variable (copy-tree (cdr setting)))))) settings)))))
+                       (set (make-local-variable variable) (static-site--copy (cdr setting)))
+                       (cons variable (static-site--copy (cdr setting)))))) settings)))))
 
 (defun static-site--root ()
   "Return the canonical local project root."
@@ -213,6 +219,12 @@ precedence.  Loading another adapter never changes an existing project's jobs."
 
 (defun static-site--idle (state &optional building)
   "Reject overlapping jobs for STATE, including watchers when BUILDING."
+  (when (and (static-site--state-action state)
+             (not (eq static-site--owner (static-site--state-action state))))
+    (user-error "A site action is active; cancel or wait for it"))
+  (when (and (processp (static-site--state-server state))
+             (process-get (static-site--state-server state) 'static-site-stopping))
+    (user-error "Preview process tree is still stopping"))
   (when (process-live-p (static-site--state-process state))
     (user-error "A site job is already running; use M-x static-site-cancel"))
   (when (and building (static-site--state-watches state)
@@ -322,7 +334,7 @@ settings or persist them in trusted directory locals.  No files are changed."
       (let ((inhibit-read-only t)) (erase-buffer))
       (compilation-mode)
       (dolist (setting settings)
-        (set (make-local-variable (car setting)) (copy-tree (cdr setting))))
+        (set (make-local-variable (car setting)) (static-site--copy (cdr setting))))
       (setq-local default-directory directory
                   static-site-root (static-site--state-root state)
                   static-site-build-command command
@@ -347,7 +359,7 @@ Call DONE once with non-nil on success, nil on failure or cancellation."
   (static-site--idle state)
   (let ((environment (copy-sequence process-environment))
         (search-path (copy-sequence exec-path))
-        (steps (copy-tree steps)))
+        (steps (static-site--copy steps)))
     (cl-labels
       ((finish (ok)
          (setf (static-site--state-process state) nil)
@@ -381,7 +393,8 @@ Call DONE once with non-nil on success, nil on failure or cancellation."
                         :sentinel
                         (lambda (process _event)
                           (when (and (memq (process-status process) '(exit signal))
-                                     (not (process-get process 'static-site-finished)))
+                                     (not (process-get process 'static-site-finished))
+                                     (not (process-get process 'static-site-stopping)))
                             (process-put process 'static-site-finished t)
                             (if (and (eq (process-status process) 'exit)
                                      (not (process-get process 'static-site-cancelled))
@@ -398,91 +411,51 @@ Call DONE once with non-nil on success, nil on failure or cancellation."
 (defun static-site-build ()
   "Build and validate this project asynchronously."
   (interactive)
-  (let ((state (static-site--state)))
-    (static-site--idle state t)
-    (let* ((context (static-site--environment (static-site--state-root state)))
-           (process-environment (car context)) (exec-path (cdr context)))
-      (static-site--run state (static-site--build-steps (static-site--state-root state))
-                      (static-site--buffer state "build")
-                      (lambda (ok) (message "Site build %s" (if ok "succeeded" "failed; see diagnostics")))))))
+  (static-site-invoke-action 'build))
 
 ;;;###autoload
 (defun static-site-cancel ()
   "Cancel this project's active build or transfer."
   (interactive)
-  (when-let* ((process (static-site--state-process (static-site--state))))
-    (process-put process 'static-site-cancelled t)
-    (static-site--terminate process)))
+  (let* ((state (static-site--state)) (token (static-site--state-action state))
+         (process (static-site--state-process state)))
+    (when token (setf (plist-get token :cancelled) t))
+    (if (process-live-p process)
+        (progn (process-put process 'static-site-cancelled t)
+               (static-site--terminate process))
+      (unless (and process (process-get process 'static-site-stopping))
+        (when token (funcall (plist-get token :finish) '(:status cancelled)))))))
 
 (defun static-site--terminate (process)
-  "Terminate owned PROCESS and its subprocesses where supported."
-  (when (process-live-p process)
+  "Asynchronously stop PROCESS's tree; ownership remains until completion."
+  (when (and (process-live-p process) (not (process-get process 'static-site-stopping)))
     (if (eq system-type 'windows-nt)
         (let ((taskkill (executable-find "taskkill")))
-          (unless taskkill (user-error "taskkill is required to stop a Windows process tree"))
-          (with-temp-buffer
-            (let ((status (call-process taskkill nil t nil
-                                        "/PID" (number-to-string (process-id process)) "/T" "/F")))
-              ;; taskkill can report an already-exited descendant; collect the
-              ;; parent's exit event before deciding whether it is still alive.
-              (accept-process-output process 0.1)
-              (when (and (not (eq status 0)) (process-live-p process))
-                (user-error "Could not stop the site process tree: %s" (string-trim (buffer-string)))))))
-      ;; Unlike deleting just the process object, this signals its process group.
+          (unless taskkill (user-error "taskkill is required to stop the process tree"))
+          (process-put process 'static-site-stopping t)
+          (condition-case err
+              (make-process
+               :name "static-site-stop" :buffer nil :noquery t :connection-type 'pipe
+               :command (list taskkill "/PID" (number-to-string (process-id process)) "/T" "/F")
+               :sentinel
+               (lambda (killer _event)
+                 (when (memq (process-status killer) '(exit signal))
+                   (cl-labels ((finished ()
+                                 (if (process-live-p process)
+                                     (if (= (process-exit-status killer) 0)
+                                         (run-at-time 0.02 nil #'finished)
+                                       (process-put process 'static-site-stopping nil)
+                                       (message "Process tree stop failed; ownership retained, retry cancel"))
+                                   (process-put process 'static-site-stopping nil)
+                                   (when-let* ((sentinel (process-sentinel process)))
+                                     (funcall sentinel process "Process tree stopped")))))
+                     (finished)))))
+            (error (process-put process 'static-site-stopping nil) (signal (car err) (cdr err)))))
       (kill-process process))))
 
 (dolist (command '(static-site-preview-start static-site-preview-stop static-site-preview-follow static-site-preview-browser static-site-preview-eww static-site-preview-status)) (autoload command "static-site-preview" nil t))
 (dolist (command '(static-site-author-mode static-site-insert-template static-site-new-article))
   (autoload command "static-site-author" nil t))
-
-(defun static-site--destination ()
-  "Validate and return the SSH destination, never a daemon URL."
-  (unless (and (stringp static-site-deploy-host)
-               (string-match-p
-                "\\`\\(?:[[:alnum:]_][[:alnum:]_.-]*@\\)?[[:alnum:]][[:alnum:]._-]*\\'"
-                static-site-deploy-host))
-    (user-error "Set static-site-deploy-host to an SSH alias or user@host"))
-  (let* ((path static-site-deploy-directory)
-         (parts (and (stringp path) (split-string path "/" t))))
-    (unless (and (stringp path) (string-prefix-p "/" path)
-                 (not (string-prefix-p "//" path)) (>= (length parts) 2)
-                 (cl-every (lambda (part)
-                             (and (string-match-p "\\`[[:alnum:]_. -]+\\'" part)
-                                  (not (member part '("." ".."))))) parts)
-                 (not (member (string-remove-suffix "/" path)
-                              '("/var/www" "/usr/local" "/home/root"))))
-      (user-error "Set a dedicated absolute server directory, e.g. /srv/www/blog"))
-    (concat static-site-deploy-host ":/" (string-join parts "/") "/")))
-
-(defun static-site--rsh-quote (argument)
-  "Quote ARGUMENT for rsync's own -e parser, not for a shell."
-  (when (string-match-p "[\0\r\n]" argument) (user-error "Invalid SSH argument"))
-  (concat "'" (replace-regexp-in-string "'" "''" argument t t) "'"))
-
-(defun static-site--rsync-command (destination)
-  "Capture a safe transfer command for DESTINATION."
-  (let* ((ssh (car (static-site--command (list static-site-ssh-program))))
-         (config (when static-site-ssh-config
-                   (when (or (file-remote-p static-site-ssh-config)
-                             (not (file-readable-p static-site-ssh-config)))
-                     (user-error "SSH configuration must be a readable local file"))
-                   (expand-file-name static-site-ssh-config)))
-         (options '("BatchMode=yes" "StrictHostKeyChecking=yes" "UpdateHostKeys=no"
-                    "PreferredAuthentications=publickey" "PasswordAuthentication=no"
-                    "KbdInteractiveAuthentication=no" "ForwardAgent=no"
-                    "ClearAllForwardings=yes" "RequestTTY=no" "ControlMaster=no"
-                    "ControlPath=none" "ConnectTimeout=10" "ServerAliveInterval=15"
-                    "ServerAliveCountMax=3"))
-         (rsh (mapconcat #'static-site--rsh-quote
-                         (append (list ssh)
-                                 (cl-mapcan (lambda (option) (list "-o" option)) options)
-                                 (when config (list "-F" config))) " ")))
-    (append (static-site--command (list static-site-rsync-program))
-            '("--recursive" "--times" "--perms" "--chmod=D755,F644"
-              "--omit-dir-times" "--delay-updates" "--itemize-changes"
-              "--human-readable" "--timeout=60" "-s")
-            (when static-site-deploy-delete '("--delete-delay"))
-            (list "-e" rsh "--" "./" destination))))
 
 (defun static-site--public (root)
   "Resolve the configured public folder strictly inside ROOT."
@@ -494,121 +467,29 @@ Call DONE once with non-nil on success, nil on failure or cancellation."
       (user-error "Public output must be a subdirectory of the project"))
     (file-name-as-directory source)))
 
-(defun static-site--check-tree (directory)
-  "Reject symlinks and special files anywhere under DIRECTORY."
-  (when (file-symlink-p (directory-file-name directory))
-    (user-error "Publish output must not contain symlinks: %s" directory))
-  (dolist (entry (directory-files directory t directory-files-no-dot-files-regexp))
-    (cond ((file-symlink-p entry) (user-error "Publish output contains a symlink: %s" entry))
-          ((file-directory-p entry) (static-site--check-tree entry))
-          ((not (file-regular-p entry)) (user-error "Not a regular publish file: %s" entry)))))
-
-(defun static-site--snapshot (root source &optional entry-file)
-  "Copy built SOURCE into a fresh private snapshot under ROOT."
-  (let ((entry (expand-file-name (or entry-file static-site-entry-file) source)))
-    (unless (and (file-directory-p source) (file-in-directory-p entry source)
-                 (file-regular-p entry) (> (file-attribute-size (file-attributes entry)) 0))
-      (user-error "Publish output needs a nonempty entry file inside it: %s" entry)))
-  (static-site--check-tree source)
-  (let ((cache (expand-file-name ".cache/" root)))
-    (when (or (file-symlink-p (directory-file-name cache))
-              (not (file-in-directory-p (file-truename cache) root)))
-      (user-error "Deployment cache must stay inside this project"))
-    (make-directory cache t)
-    (let ((snapshot (make-temp-file (expand-file-name "static-site-deploy-" cache) t)))
-      (condition-case err
-          (progn (copy-directory source snapshot t t t)
-                 (set-file-modes snapshot #o700)
-                 snapshot)
-        (error (static-site--remove-snapshot root snapshot) (signal (car err) (cdr err)))))))
-
-(defun static-site--remove-snapshot (root directory)
-  "Delete only an owned deployment snapshot DIRECTORY within ROOT."
-  (when (and directory (file-exists-p directory))
-    (unless (and (not (file-symlink-p directory))
-                 (string-prefix-p "static-site-deploy-" (file-name-nondirectory directory))
-                 (equal (file-name-directory (directory-file-name (expand-file-name directory)))
-                        (expand-file-name ".cache/" root))
-                 (file-in-directory-p (file-truename directory) (file-truename root)))
-      (error "Refusing to remove a directory outside the deployment cache"))
-    (delete-directory directory t)))
-
-;;;###autoload
 (defun static-site-deploy-forget ()
-  "Discard this project's prepared deployment snapshot."
+  "Invoke the project's deploy-forget provider or optional legacy rsync workflow."
   (interactive)
-  (let ((state (static-site--state)))
-    (static-site--idle state)
-    (static-site--remove-snapshot (static-site--state-root state)
-                                 (plist-get (static-site--state-plan state) :snapshot))
-    (setf (static-site--state-plan state) nil)))
+  (if (static-site-action-available-p 'deploy-forget)
+      (static-site-invoke-action 'deploy-forget)
+    (require 'static-site-deploy-rsync)
+    (static-site-rsync-deploy-forget)))
 
-;;;###autoload
 (defun static-site-deploy-preview ()
-  "Build, validate, snapshot, and show the remote rsync dry run.
-Never change the remote site.  Only a successful dry run enables publishing."
+  "Invoke the project's deploy-preview provider or optional legacy rsync workflow."
   (interactive)
-  (let* ((state (static-site--state))
-         (root (static-site--state-root state)))
-    (static-site--idle state t)
-    (let* ((context (static-site--environment root))
-           (process-environment (car context)) (exec-path (cdr context))
-           (destination (static-site--destination))
-           (command (static-site--rsync-command destination))
-           (source (static-site--public root))
-           (entry static-site-entry-file)
-           (steps (static-site--build-steps root))
-           (delete static-site-deploy-delete)
-           (buffer (static-site--buffer state "deploy")))
-      (static-site-deploy-forget)
-      (static-site--log buffer (format "Destination: %s\nRemove stale files: %s\n" destination delete))
-      (static-site--run
-       state steps buffer
-       (lambda (ok)
-         (if (not ok) (message "Deployment stopped: build/validation failed")
-           (let ((snapshot (static-site--snapshot root source entry)))
-             (static-site--run
-              state (list (cons (file-name-as-directory snapshot)
-                                (append (list (car command) "--dry-run") (cdr command)))) buffer
-              (lambda (success)
-                (if success
-                    (progn
-                      (setf (static-site--state-plan state)
-                            (list :snapshot snapshot :command command
-                                  :environment (copy-sequence process-environment)
-                                  :exec-path (copy-sequence exec-path)
-                                  :destination destination :delete delete))
-                      (message "Review the dry run, then M-x static-site-deploy-publish"))
-                  (static-site--remove-snapshot root snapshot)
-                  (message "Deployment preview failed; publishing is disabled")))))))))))
+  (if (static-site-action-available-p 'deploy-preview)
+      (static-site-invoke-action 'deploy-preview)
+    (require 'static-site-deploy-rsync)
+    (static-site-rsync-deploy-preview)))
 
-;;;###autoload
 (defun static-site-deploy-publish ()
-  "Confirm and publish the exact snapshot from the last successful dry run.
-Later Emacs settings and builds do not change the captured command or snapshot.
-SSH configuration remains external; preview again after changing it."
+  "Invoke the project's deploy-publish provider or optional legacy rsync workflow."
   (interactive)
-  (let* ((state (static-site--state))
-         (root (static-site--state-root state))
-         (plan (static-site--state-plan state))
-         (snapshot (plist-get plan :snapshot)))
-    (static-site--idle state)
-    (unless (and plan (file-directory-p snapshot))
-      (user-error "Run M-x static-site-deploy-preview successfully first"))
-    (when (yes-or-no-p
-           (format "Publish reviewed snapshot to %s%s? " (plist-get plan :destination)
-                   (if (plist-get plan :delete) " (including remote deletions)" "")))
-      (static-site--check-tree snapshot)
-      (setf (static-site--state-plan state) nil)
-      (let ((process-environment (copy-sequence (plist-get plan :environment)))
-            (exec-path (copy-sequence (plist-get plan :exec-path))))
-        (static-site--run
-       state (list (cons (file-name-as-directory snapshot) (plist-get plan :command)))
-       (static-site--buffer state "publish")
-       (lambda (ok)
-         (static-site--remove-snapshot root snapshot)
-         (message (if ok "Site published successfully"
-                    "Publish failed or cancelled; remote files may be partially updated. Run a new preview."))))))))
+  (if (static-site-action-available-p 'deploy-publish)
+      (static-site-invoke-action 'deploy-publish)
+    (require 'static-site-deploy-rsync)
+    (static-site-rsync-deploy-publish)))
 
 (defvar static-site-mode-map
   (let ((map (make-sparse-keymap)))
@@ -631,7 +512,20 @@ SSH configuration remains external; preview again after changing it."
   "Opt-in commands for the current static-site project.
 The configured preview command owns file watching and browser live reload."
   :lighter " Site" :keymap static-site-mode-map
-  (static-site-author-mode (if static-site-mode 1 -1)))
+  (condition-case err
+      (progn
+        (static-site-author-mode (if static-site-mode 1 -1))
+        (if static-site-mode
+            (progn (static-site--activate-contributions)
+                   (add-hook 'after-save-hook #'static-site-preview-notify-save nil t))
+          (static-site--deactivate-contributions)
+          (remove-hook 'after-save-hook #'static-site-preview-notify-save t)))
+    (error (setq static-site-mode nil)
+           (static-site-author-mode -1)
+           (static-site--deactivate-contributions)
+           (remove-hook 'after-save-hook #'static-site-preview-notify-save t)
+           (signal (car err) (cdr err)))))
 
 (provide 'static-site)
+(require 'static-site-api)
 ;;; static-site.el ends here

@@ -27,3 +27,11 @@ Build processes and HTTP checks are asynchronous. There is one request at a time
 Native compatibility demonstrates coexistence with the tested make4ht mechanisms, not universal compatibility with every third-party extension. Plain HTTP servers have availability checks; project/backend verification and EWW revision refresh require the optional status decoder. The blog server supplies that decoder contract.
 
 No live deployment occurred. Rsync is absent from this Windows PATH and no destination was supplied. SSH argument enforcement, snapshot ownership and transfer state transitions are tested offline; actual authentication, remote permissions and synchronization still require a test against the intended server. This package does not provide atomic deployment or rollback.
+
+## API v1 / version 0.3.0 — 2026-09-28
+
+Validated on Emacs 31.1/Windows. Five runtime modules byte-compiled without warnings. `check-workflow.el`: 37/37 passed (latest run 21.18 s), including real child-tree cancellation, snapshot-worker execution with mocked transfers, preview identity and existing environment isolation. `check-api.el`: 9/9 passed, including a real nonblog generator, captured settings, preflight/late-callback cancellation, repeated cancel while a process tree is stopping, root/reload conflicts, local contributions, completion bounds, coalesced probes and hidden EWW/page hashes.
+
+The isolated blog adapter's 6/6 checks passed without private framework calls. Its live one-project integration exercised real make4ht, EWW source refresh, source line mapping, failure recovery and asynchronous stop/cleanup. No deployment to a real server occurred. Nonblog onboarding and exact contracts are in docs/PLUGIN-API.md. Other platforms/Emacs versions and fully interactive AUCTeX/YAS sessions were not newly exercised; buffer-local isolation was tested with Lisp fixtures.
+
+The new package and adapter remain in their development repositories. This validation does not imply that the installed package or the user's global LaTeX configuration was updated.

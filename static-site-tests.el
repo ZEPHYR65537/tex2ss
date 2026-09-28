@@ -1,6 +1,7 @@
 ;;; static-site-tests.el --- Offline workflow regression tests -*- lexical-binding: t; -*-
 (require 'ert)
 (require 'static-site)
+(require 'static-site-deploy-rsync)
 
 (defconst static-site-test--root
   (file-name-directory load-file-name))
@@ -33,8 +34,16 @@
                       (static-site-preview--close-request session)))
                   (dolist (process (list (static-site--state-process state)
                                         (static-site--state-server state)))
-                    (when (process-live-p process) (delete-process process))))
+                    (when (process-live-p process)
+                      (static-site--terminate process)
+                      (static-site-test--wait (lambda () (not (process-live-p process)))))))
                 static-site--states)
+       ;; Cancellation is asynchronous now: collect tree-stop completion before
+       ;; removing directories that a just-stopped Windows child may still own.
+       (static-site-test--wait
+        (lambda () (not (cl-some (lambda (p) (and (process-live-p p)
+                                            (string-prefix-p "static-site-stop" (process-name p))))
+                                 (process-list)))))
        (when (file-in-directory-p (file-truename static-site-root) cache)
          (delete-directory static-site-root t)))))
 
@@ -51,6 +60,12 @@
     (while (and (not (funcall predicate)) (< (float-time) deadline))
       (accept-process-output nil 0.02)))
   (should (funcall predicate)))
+
+(defun static-site-test--snapshot-steps (steps)
+  "Execute local snapshot workers while transfer steps remain mocked."
+  (dolist (step steps)
+    (when (cl-some (lambda (arg) (string-suffix-p "static-site-snapshot.el" arg)) (cdr step))
+      (should (= 0 (apply #'call-process (cadr step) nil nil nil (cddr step)))))))
 
 (ert-deftest static-site-destinations-reject-injection-and-broad-paths ()
   (static-site-test--project
@@ -202,8 +217,9 @@
                  (lambda (_state steps _buffer done)
                    (cl-incf calls)
                    (when (= calls 2)
+                     (static-site-test--snapshot-steps steps)
                      (setq snapshot (caar steps))
-                     (should (member "--dry-run" (cdar steps))))
+                     (should (member "--dry-run" (cdr (car (last steps))))))
                    (funcall done (= calls 1)))))
         (static-site-deploy-preview))
       (should (= calls 2))
@@ -216,7 +232,8 @@
     (let ((public (static-site-test--public)) commands directories prompt)
       (cl-letf (((symbol-function 'static-site--run)
                  (lambda (_state steps _buffer done)
-                   (push (cdar steps) commands) (push (caar steps) directories)
+                   (static-site-test--snapshot-steps steps)
+                   (push (cdr (car (last steps))) commands) (push (caar steps) directories)
                    (when (= (length commands) 3)
                      (should (equal (with-temp-buffer
                                       (insert-file-contents (expand-file-name "index.html" (caar steps)))
@@ -240,7 +257,7 @@
 (ert-deftest static-site-declining-publish-keeps-reviewed-plan ()
   (static-site-test--project
     (static-site-test--public)
-    (cl-letf (((symbol-function 'static-site--run) (lambda (_s _steps _b done) (funcall done t))))
+    (cl-letf (((symbol-function 'static-site--run) (lambda (_s steps _b done) (static-site-test--snapshot-steps steps) (funcall done t))))
       (static-site-deploy-preview))
     (let ((plan (static-site--state-plan (static-site--state))))
       (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) nil))

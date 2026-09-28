@@ -33,32 +33,35 @@ and media templates.  No blog macros are imposed on general TeX projects."
     table))
 
 (defun static-site-completion-at-point ()
-  "Complete metadata keys/enum values only inside the configured declaration."
+  "Complete literal metadata with a bounded single scan of its contents."
   (when (and static-site-metadata-command static-site-metadata-keys)
     (save-excursion
       (let ((end (point)) (limit (max (point-min) (- (point) 20000))))
         (when (re-search-backward
                (concat "\\\\" (regexp-quote static-site-metadata-command) "[ \t\n]*{") limit t)
-          (let ((start (match-end 0)) (entry (match-end 0)))
+          (let ((start (match-end 0)) (entry (match-end 0)) (depth 1) comment)
             (with-syntax-table static-site-author--syntax-table
               (unless (nth 4 (parse-partial-sexp (line-beginning-position) (point)))
-              (let ((context (parse-partial-sexp (1- start) end)))
-                (when (and (> (car context) 0) (not (nth 4 context)))
-                  ;; Commas in nested values are not field separators.
-                  (goto-char start)
-                  (while (search-forward "," end t)
-                    (let ((comma (point)))
-                      (when (= (car (parse-partial-sexp (1- start) (1- comma))) 1)
-                        (setq entry comma))
-                      (goto-char comma)))
-                  (let ((text (buffer-substring-no-properties entry end)))
+                (goto-char start)
+                (while (and (< (point) end) (> depth 0))
+                  (let ((char (char-after)))
                     (cond
-                     ((string-match "\\`[ \t\n]*\\([a-zA-Z0-9_.-]*\\)\\'" text)
-                      (list (- end (length (match-string 1 text))) end
-                            (mapcar #'car static-site-metadata-keys) :exclusive 'no))
-                     ((string-match "\\`[ \t\n]*\\([a-zA-Z0-9_.-]+\\)[ \t\n]*=[ \t\n]*{?\\([a-zA-Z0-9_-]*\\)\\'" text)
-                      (when-let* ((values (cdr (assoc (match-string 1 text) static-site-metadata-keys))))
-                        (list (- end (length (match-string 2 text))) end values :exclusive 'no)))))))))))))))
+                     (comment (when (= char ?\n) (setq comment nil)))
+                     ((= char ?\\) (when (< (1+ (point)) end) (forward-char)))
+                     ((= char ?%) (setq comment t))
+                     ((= char ?{) (setq depth (1+ depth)))
+                     ((= char ?}) (setq depth (1- depth)))
+                     ((and (= char ?,) (= depth 1)) (setq entry (1+ (point)))))
+                    (forward-char)))
+                  (when (and (> depth 0) (not comment))
+                    (let ((text (buffer-substring-no-properties entry end)))
+                      (cond
+                       ((string-match "\\`[ \t\n]*\\([a-zA-Z0-9_.-]*\\)\\'" text)
+			(list (- end (length (match-string 1 text))) end
+                              (mapcar #'car static-site-metadata-keys) :exclusive 'no))
+                       ((string-match "\\`[ \t\n]*\\([a-zA-Z0-9_.-]+\\)[ \t\n]*=[ \t\n]*{?\\([a-zA-Z0-9_-]*\\)\\'" text)
+			(when-let* ((values (cdr (assoc (match-string 1 text) static-site-metadata-keys))))
+                          (list (- end (length (match-string 2 text))) end values :exclusive 'no))))))))))))))
 
 ;;;###autoload
 (defun static-site-insert-template (name)

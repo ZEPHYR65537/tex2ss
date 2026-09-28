@@ -2,11 +2,11 @@
 
 A general-purpose Emacs package for building, previewing and publishing static-file projects. It works with make4ht alone, make4ht followed by any frontend framework, or other generators. The package is maintained in its own repository. Both blog candidates use this shared installation and carry only their own adapter; neither bundles another copy of the package.
 
-This is version 0.2.0, tested locally with Emacs 31.1 on Windows. The declared minimum is Emacs 28.1; other Emacs/OS combinations still need testing. It is not a claim of production-proven reliability.
+This is version 0.3.0, tested locally with Emacs 31.1 on Windows. The declared minimum is Emacs 28.1; other Emacs/OS combinations still need testing. It is not a claim of production-proven reliability.
 
 ## Install
 
-See [the public API and site-plugin design](docs/SITE-PLUGIN-DESIGN.md) for the proposed next steps. The new interfaces described there are not implemented yet. Develop in a separate checkout, then synchronize the installation through Git when authorized; keep global Emacs configuration outside this workflow.
+See [the public API guide](docs/PLUGIN-API.md) for root-local plugins, asynchronous actions and migration from private helpers. The [design record](docs/SITE-PLUGIN-DESIGN.md) tracks implementation scope. Develop in a separate checkout, then synchronize the installation through Git when authorized; keep global Emacs configuration outside this workflow.
 
 Put this directory on `load-path` in your own Emacs configuration:
 
@@ -15,7 +15,7 @@ Put this directory on `load-path` in your own Emacs configuration:
 (require 'static-site)
 ```
 
-On Windows use forward slashes, for example `D:/tools/static_site`. Keep the three runtime modules together: `static-site.el`, `static-site-preview.el`, and `static-site-author.el`. Tests and examples are optional. There are no third-party Emacs dependencies. The preview server and build executables are chosen by the project; Node.js and Astro are not package requirements.
+On Windows use forward slashes, for example `D:/tools/static_site`. Keep `static-site.el`, `static-site-api.el`, `static-site-preview.el`, and `static-site-author.el` together. Legacy rsync deployment additionally needs `static-site-deploy-rsync.el` and its `static-site-snapshot.el` worker; it is loaded only when used. Tests and examples are optional. There are no third-party Emacs dependencies. The preview server and build executables are chosen by the project; Node.js and Astro are not package requirements.
 
 For a Purcell-style configuration using local `pkg/` packages, place this
 directory at `~/.emacs.d/pkg/static_site/`, copy
@@ -95,7 +95,7 @@ Execution order is `static-site-generators`, `static-site-build-command`, `stati
 
 `static-site-environment` is an alist of environment overrides such as `(("TEXINPUTS" . "tex//;"))`; nil values unset variables. Keep the platform's TeX search-path separator and empty default-search entry as appropriate. `static-site-exec-path` prepends project-relative executable directories to both PATH and Emacs's search path. The complete effective environment and executable path are captured before launching a job, preserved across all asynchronous steps and callbacks, and retained for the reviewed deployment. Temporary `let` bindings therefore survive the first child process exiting. Environment values are not logged.
 
-Scripts decide their inputs, outputs, caches, asset management and dependencies. There is no registration service, plugin discovery, dependency solver, special serialization format, or enforced template system. Do not put passwords or private key contents in command arguments: commands are shown in the diagnostics buffer.
+Scripts decide their inputs, outputs, caches, asset management and dependencies. Advanced integrations can explicitly register a root-local Lisp plugin using API version 1; there is no automatic discovery, dependency solver, special serialization format, or enforced template system. Do not put passwords or private key contents in command arguments: commands are shown in the diagnostics buffer.
 
 For example, make4ht can generate content first and Astro can build the final site:
 
@@ -131,7 +131,7 @@ The package checks root, backend and the owned process's instance token before o
 
 Use `M-x static-site-preview-follow` to explicitly follow an external server. This requires an identity decoder and checks its root/backend. Stopping a followed session cancels its polling without killing the external process. Stopping an owned session cancels pending requests and queued opens, and terminates only that process tree. Changed preview commands, environments or targets require a stop/restart. `M-x static-site-preview-status` shows the current project's status and diagnostics.
 
-The status header and diagnostics expose failed builds; EWW keeps its last successful content until recovery. Only that project's EWW buffer refreshes after a successful revision. The preview command owns file watching and graphical live reload. Generic servers cannot report build failures or revisions without the optional decoder. Independent editors and arbitrary external builders still need their own cross-process coordination.
+The status header and diagnostics expose failed builds; EWW keeps its last successful content until recovery. Optional `:page-revisions` route/hash pairs avoid refreshing unchanged pages; hidden EWW buffers refresh when displayed. Idle polling backs off to 30 seconds, with short fast checks after saves and while building. The preview command owns file watching and graphical live reload. Generic servers cannot report build failures or revisions without the optional decoder. Independent editors and arbitrary external builders still need their own cross-process coordination.
 
 ## Authoring and source errors
 
@@ -189,9 +189,10 @@ This is file synchronization, **not an atomic whole-site release or rollback sys
 ## Checks
 
 ```text
-emacs --batch -Q -L . -f batch-byte-compile static-site.el static-site-preview.el static-site-author.el
+emacs --batch -Q -L . -f batch-byte-compile static-site.el static-site-api.el static-site-preview.el static-site-author.el static-site-deploy-rsync.el
 emacs --batch -Q -L . -l static-site-tests.el
 emacs --batch -Q -L . -l check-workflow.el
+emacs --batch -Q -L . -l check-api.el
 emacs --batch -Q -L . -l check-make4ht.el
 emacs --batch -Q -L . -l check-extensions.el
 ```
